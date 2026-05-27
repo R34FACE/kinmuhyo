@@ -465,12 +465,12 @@ function renderTable(result) {
     </thead>
   `;
   const body = result.schedule.map((row) => {
-    const dateLabel = `${row.day}日 (${WEEKDAYS[row.weekday]})`;
+    const dateLabel = `${row.day}日`;
     const dayClass = isWeekendOrHoliday(row, result.holidays) ? "weekend-holiday" : "";
     const workers = STAFF.filter((staff) => WORK_TYPES.has(row.cells[staff])).length;
     return `
       <tr>
-        <td class="${dayClass}">${dateLabel}</td>
+        <td class="${dayClass}"><span class="day-number">${dateLabel}</span><span class="weekday">${WEEKDAYS[row.weekday]}</span></td>
         ${STAFF.map((staff) => `<td class="${cellClass(row.cells[staff])}">${row.cells[staff]}</td>`).join("")}
         <td class="count-cell">${workers}</td>
       </tr>
