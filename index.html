@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>勤務表自動作成ツール</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">7人勤務表</p>
+        <h1>勤務表自動作成ツール</h1>
+      </div>
+      <button id="generateBtn" class="primary-action" type="button">自動作成</button>
+    </header>
+
+    <main class="app-shell">
+      <section class="panel controls-panel" aria-labelledby="settingsTitle">
+        <div class="section-head">
+          <h2 id="settingsTitle">入力</h2>
+          <button id="sampleBtn" class="ghost-action" type="button">サンプル入力</button>
+        </div>
+
+        <div class="month-grid">
+          <label>
+            年
+            <input id="yearInput" type="number" min="2020" max="2035" inputmode="numeric">
+          </label>
+          <label>
+            月
+            <input id="monthInput" type="number" min="1" max="12" inputmode="numeric">
+          </label>
+        </div>
+
+        <p class="hint">日付は「3, 5, 12」のようにカンマ区切りで入力できます。希望公休は必ず休みにし、有給は公休とは別集計、出張・研修は勤務扱いです。</p>
+
+        <div id="staffInputs" class="staff-inputs"></div>
+      </section>
+
+      <section class="results-area" aria-live="polite">
+        <div class="panel summary-panel">
+          <div class="section-head">
+            <h2>結果</h2>
+            <div class="actions">
+              <button id="exportBtn" class="ghost-action" type="button" disabled>Excel出力</button>
+              <button id="clearBtn" class="ghost-action" type="button">クリア</button>
+            </div>
+          </div>
+          <div id="summary" class="summary-grid"></div>
+        </div>
+
+        <div id="messages" class="messages"></div>
+
+        <div class="panel table-panel">
+          <div class="table-wrap">
+            <table id="scheduleTable" class="schedule-table"></table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
