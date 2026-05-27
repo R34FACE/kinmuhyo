@@ -282,7 +282,7 @@ input {
 
 .schedule-table {
   width: 100%;
-  min-width: 860px;
+  min-width: 640px;
   table-layout: fixed;
   border-collapse: collapse;
   font-size: 14px;
@@ -408,7 +408,7 @@ input {
   }
 
   .schedule-table {
-    min-width: 610px;
+    min-width: 450px;
     font-size: 12px;
   }
 
