@@ -1,6 +1,7 @@
 const STAFF = ["A", "B", "C", "D", "E", "F", "G"];
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
-const WORK_TYPES = new Set(["出", "出張", "研修"]);
+const WORK_TYPES = new Set(["出", "出張", "研修", "早帰り", "遅番"]);
+const SHIFT_ELIGIBLE_STAFF = STAFF.filter((staff) => staff !== "D" && staff !== "G");
 const OFF_TARGETS = { A: 10, B: 10, C: 10, D: 9, E: 10, F: 10, G: 9 };
 const MAX_ATTEMPTS = 1800;
 
@@ -8,6 +9,8 @@ const els = {
   year: document.getElementById("yearInput"),
   month: document.getElementById("monthInput"),
   staffInputs: document.getElementById("staffInputs"),
+  earlyShift: document.getElementById("earlyShiftInput"),
+  lateShift: document.getElementById("lateShiftInput"),
   generate: document.getElementById("generateBtn"),
   export: document.getElementById("exportBtn"),
   clear: document.getElementById("clearBtn"),
@@ -67,12 +70,13 @@ function generate() {
 
   const daysInMonth = new Date(year, month, 0).getDate();
   const holidays = getJapaneseHolidaySet(year, month);
+  const shiftOptions = getShiftOptions();
   const { inputs, warnings } = getInputs(daysInMonth);
   const fixedWarnings = findInputConflicts(inputs);
 
   let best = null;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-    const candidate = buildCandidate(year, month, daysInMonth, holidays, inputs, attempt);
+    const candidate = buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions, attempt);
     const validation = validateSchedule(candidate, inputs, holidays);
     const score = scoreCandidate(validation, candidate, inputs, holidays);
     if (!best || score < best.score) {
@@ -87,10 +91,18 @@ function generate() {
     daysInMonth,
     holidays,
     inputs,
+    shiftOptions,
     schedule: best.candidate.schedule,
     summary: best.candidate.summary,
     errors: unique([...warnings, ...fixedWarnings, ...best.validation.errors]),
-    notices: best.validation.notices,
+    notices: unique([...best.validation.notices, ...best.candidate.shiftNotices]),
+  };
+}
+
+function getShiftOptions() {
+  return {
+    early: els.earlyShift.checked,
+    late: els.lateShift.checked,
   };
 }
 
@@ -134,7 +146,7 @@ function parseDays(value, daysInMonth) {
   return { days, invalid };
 }
 
-function buildCandidate(year, month, daysInMonth, holidays, inputs, attempt) {
+function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions, attempt) {
   const schedule = [];
   const offRemaining = Object.fromEntries(STAFF.map((staff) => [staff, targetPublicOff(staff)]));
 
@@ -196,8 +208,9 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, attempt) {
   }
 
   repairLongRuns(schedule, inputs, holidays);
+  const shiftNotices = applySelectedShiftTypes(schedule, shiftOptions, attempt);
   const summary = summarize(schedule, inputs, holidays);
-  return { schedule, summary };
+  return { schedule, summary, shiftNotices };
 }
 
 function repairLongRuns(schedule, inputs, holidays) {
@@ -310,6 +323,58 @@ function offScore(schedule, day, staff, offRemaining, inputs, holidays, attempt)
   return score;
 }
 
+function applySelectedShiftTypes(schedule, shiftOptions, attempt) {
+  const notices = [];
+  const assignments = [];
+
+  if (shiftOptions.early) {
+    assignments.push({ type: "早帰り", preferred: "beforeOff" });
+  }
+  if (shiftOptions.late) {
+    assignments.push({ type: "遅番", preferred: "afterOff" });
+  }
+
+  assignments.forEach((assignment) => {
+    SHIFT_ELIGIBLE_STAFF.forEach((staff) => {
+      const target = findShiftAssignmentDay(schedule, staff, assignment.preferred, attempt);
+      if (target) {
+        schedule[target - 1].cells[staff] = assignment.type;
+      } else {
+        notices.push(`スタッフ${staff}に${assignment.type}を割り当てられる通常出勤日がありませんでした。D・Gは対象外です。`);
+      }
+    });
+  });
+
+  return notices;
+}
+
+function findShiftAssignmentDay(schedule, staff, preferred, attempt) {
+  const candidates = schedule
+    .filter((row) => row.cells[staff] === "出")
+    .map((row) => ({
+      day: row.day,
+      score: shiftAssignmentScore(schedule, row.day, staff, preferred, attempt),
+    }))
+    .sort((a, b) => b.score - a.score || a.day - b.day);
+
+  return candidates.length ? candidates[0].day : null;
+}
+
+function shiftAssignmentScore(schedule, day, staff, preferred, attempt) {
+  let score = 0;
+  const previous = schedule[day - 2];
+  const next = schedule[day];
+
+  if (preferred === "beforeOff" && next && !WORK_TYPES.has(next.cells[staff])) score += 1000;
+  if (preferred === "afterOff" && previous && !WORK_TYPES.has(previous.cells[staff])) score += 1000;
+  if (previous && !WORK_TYPES.has(previous.cells[staff])) score += 120;
+  if (next && !WORK_TYPES.has(next.cells[staff])) score += 120;
+
+  score -= Math.abs(day - (schedule.length + 1) / 2) * 2;
+  score += seedRandom(day, staff.charCodeAt(0), preferred.length, attempt) * 35;
+  return score;
+}
+
 function validateSchedule(candidate, inputs, holidays) {
   const errors = [];
   const notices = [];
@@ -333,6 +398,12 @@ function validateSchedule(candidate, inputs, holidays) {
   });
 
   schedule.forEach((row) => {
+    ["D", "G"].forEach((staff) => {
+      if (row.cells[staff] === "早帰り" || row.cells[staff] === "遅番") {
+        errors.push(`${row.day}日にスタッフ${staff}へ${row.cells[staff]}が入っています。原因: D・Gは早帰り・遅番の対象外条件`);
+      }
+    });
+
     const workers = STAFF.filter((staff) => WORK_TYPES.has(row.cells[staff])).length;
     if (workers < 4) {
       errors.push(`${row.day}日の出勤者が${workers}人です。原因: 毎日4人以上出勤の条件`);
@@ -372,7 +443,8 @@ function findInputConflicts(inputs) {
 }
 
 function scoreCandidate(validation, candidate, inputs, holidays) {
-  let score = validation.errors.length * 10000 + validation.notices.length * 90;
+  let score = validation.errors.length * 10000 + (validation.notices.length + (candidate.shiftNotices?.length || 0)) * 90;
+  score += shiftPreferencePenalty(candidate.schedule) * 25;
   STAFF.forEach((staff) => {
     score += Math.abs(candidate.summary[staff].publicOff - targetPublicOff(staff)) * 5000;
     score += Math.max(0, candidate.summary[staff].maxRun - 3) * 2200;
@@ -384,10 +456,27 @@ function scoreCandidate(validation, candidate, inputs, holidays) {
   return score;
 }
 
+function shiftPreferencePenalty(schedule) {
+  let penalty = 0;
+  schedule.forEach((row) => {
+    SHIFT_ELIGIBLE_STAFF.forEach((staff) => {
+      if (row.cells[staff] === "早帰り") {
+        const next = schedule[row.day];
+        if (!next || WORK_TYPES.has(next.cells[staff])) penalty += 1;
+      }
+      if (row.cells[staff] === "遅番") {
+        const previous = schedule[row.day - 2];
+        if (!previous || WORK_TYPES.has(previous.cells[staff])) penalty += 1;
+      }
+    });
+  });
+  return penalty;
+}
+
 function summarize(schedule, inputs, holidays) {
   const summary = {};
   STAFF.forEach((staff) => {
-    summary[staff] = { publicOff: 0, paid: 0, weekendHolidayOff: 0, trip: 0, training: 0, maxRun: 0 };
+    summary[staff] = { publicOff: 0, paid: 0, weekendHolidayOff: 0, trip: 0, training: 0, early: 0, late: 0, maxRun: 0 };
   });
 
   schedule.forEach((row) => {
@@ -397,6 +486,8 @@ function summarize(schedule, inputs, holidays) {
       if (value === "有") summary[staff].paid += 1;
       if (value === "出張") summary[staff].trip += 1;
       if (value === "研修") summary[staff].training += 1;
+      if (value === "早帰り") summary[staff].early += 1;
+      if (value === "遅番") summary[staff].late += 1;
       if ((value === "休" || value === "有") && isWeekendOrHoliday(row, holidays)) {
         summary[staff].weekendHolidayOff += 1;
       }
@@ -427,6 +518,7 @@ function renderSummary(result) {
         <span>土日祝休: ${item.weekendHolidayOff}</span>
         <span>最大連勤: ${item.maxRun}</span>
         <span>出張: ${item.trip} / 研修: ${item.training}</span>
+        <span>早帰り: ${item.early} / 遅番: ${item.late}</span>
       </div>
     `;
   }).join("");
@@ -484,6 +576,8 @@ function cellClass(value) {
   if (value === "有") return "paid";
   if (value === "出張") return "trip";
   if (value === "研修") return "training";
+  if (value === "早帰り") return "early-shift";
+  if (value === "遅番") return "late-shift";
   return "";
 }
 
@@ -497,10 +591,10 @@ function exportExcel() {
       return `<tr><td>${row.day}日(${WEEKDAYS[row.weekday]})</td>${STAFF.map((staff) => `<td>${row.cells[staff]}</td>`).join("")}<td>${workers}</td></tr>`;
     }),
     `<tr></tr>`,
-    `<tr><th>スタッフ</th><th>公休</th><th>有給</th><th>土日祝休</th><th>最大連勤</th><th>出張</th><th>研修</th></tr>`,
+    `<tr><th>スタッフ</th><th>公休</th><th>有給</th><th>土日祝休</th><th>最大連勤</th><th>出張</th><th>研修</th><th>早帰り</th><th>遅番</th></tr>`,
     ...STAFF.map((staff) => {
       const item = currentResult.summary[staff];
-      return `<tr><td>${staff}</td><td>${item.publicOff}</td><td>${item.paid}</td><td>${item.weekendHolidayOff}</td><td>${item.maxRun}</td><td>${item.trip}</td><td>${item.training}</td></tr>`;
+      return `<tr><td>${staff}</td><td>${item.publicOff}</td><td>${item.paid}</td><td>${item.weekendHolidayOff}</td><td>${item.maxRun}</td><td>${item.trip}</td><td>${item.training}</td><td>${item.early}</td><td>${item.late}</td></tr>`;
     }),
   ];
 
@@ -523,6 +617,8 @@ function clearInputs() {
   document.querySelectorAll("[data-kind][data-staff]").forEach((node) => {
     node.value = "";
   });
+  els.earlyShift.checked = false;
+  els.lateShift.checked = false;
   currentResult = null;
   els.export.disabled = true;
   renderEmptyState();
