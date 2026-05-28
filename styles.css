@@ -168,6 +168,39 @@ input {
   line-height: 1.6;
 }
 
+.shift-options {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: var(--soft);
+}
+
+.shift-options legend {
+  padding: 0 4px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+}
+
+.checkbox-label input {
+  width: 18px;
+  height: 18px;
+}
+
+.hint.compact {
+  margin: 0;
+}
+
 .staff-inputs {
   display: grid;
   gap: 12px;
@@ -358,6 +391,18 @@ input {
 .training {
   background: #ecfdf5;
   color: var(--green);
+  font-weight: 700;
+}
+
+.early-shift {
+  background: #fff7ed;
+  color: #c2410c;
+  font-weight: 700;
+}
+
+.late-shift {
+  background: #f0f9ff;
+  color: #0369a1;
   font-weight: 700;
 }
 
