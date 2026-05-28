@@ -179,7 +179,7 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
 
     for (let i = 0; i < desired; i += 1) {
       const choices = STAFF
-        .filter((staff) => offRemaining[staff] > 0 && canSetPublicOff(schedule, day, staff))
+        .filter((staff) => offRemaining[staff] > 0 && canSetPublicOff(schedule, day, staff, inputs))
         .map((staff) => ({
           staff,
           score: offScore(schedule, day, staff, offRemaining, inputs, holidays, attempt),
@@ -199,7 +199,7 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
     guard += 1;
     const staff = STAFF.find((name) => offRemaining[name] > 0);
     const choices = schedule
-      .filter((row) => canSetPublicOff(schedule, row.day, staff))
+      .filter((row) => canSetPublicOff(schedule, row.day, staff, inputs))
       .map((row) => ({ row, score: offScore(schedule, row.day, staff, offRemaining, inputs, holidays, attempt) }))
       .sort((a, b) => b.score - a.score);
     if (!choices.length) break;
@@ -225,7 +225,7 @@ function repairLongRuns(schedule, inputs, holidays) {
     let changed = false;
     for (let day = run.start; day <= run.end; day += 1) {
       if (schedule[day - 1].cells[staff] !== "出") continue;
-      if (!canSetPublicOff(schedule, day, staff)) continue;
+      if (!canSetPublicOff(schedule, day, staff, inputs)) continue;
 
       schedule[day - 1].cells[staff] = "休";
       const swapDay = findPublicOffToRelease(schedule, staff, day, inputs);
@@ -297,7 +297,7 @@ function publicOffCapacity(schedule, startDay) {
   return capacity;
 }
 
-function canSetPublicOff(schedule, day, staff) {
+function canSetPublicOff(schedule, day, staff, inputs) {
   const row = schedule[day - 1];
   if (row.cells[staff] !== "出") return false;
   if (STAFF.filter((name) => !WORK_TYPES.has(row.cells[name])).length >= 3) return false;
@@ -307,7 +307,52 @@ function canSetPublicOff(schedule, day, staff) {
     if (!WORK_TYPES.has(row.cells[other])) return false;
   }
 
+  if (wouldCreateNonRequestedThreeDayOff(schedule, day, staff, inputs)) return false;
+
   return true;
+}
+
+
+function wouldCreateNonRequestedThreeDayOff(schedule, day, staff, inputs) {
+  const offDays = [day];
+
+  for (let d = day - 1; d >= 1; d -= 1) {
+    if (WORK_TYPES.has(schedule[d - 1].cells[staff])) break;
+    offDays.push(d);
+  }
+
+  for (let d = day + 1; d <= schedule.length; d += 1) {
+    if (WORK_TYPES.has(schedule[d - 1].cells[staff])) break;
+    offDays.push(d);
+  }
+
+  if (offDays.length < 3) return false;
+  return offDays.some((offDay) => !inputs[staff].request.has(offDay));
+}
+
+function nonRequestedLongOffRuns(schedule, staff, inputs) {
+  const runs = [];
+  let start = null;
+  let days = [];
+
+  for (let day = 1; day <= schedule.length; day += 1) {
+    if (!WORK_TYPES.has(schedule[day - 1].cells[staff])) {
+      if (start === null) start = day;
+      days.push(day);
+    } else {
+      if (days.length >= 3 && days.some((offDay) => !inputs[staff].request.has(offDay))) {
+        runs.push({ start, end: days[days.length - 1], days: [...days] });
+      }
+      start = null;
+      days = [];
+    }
+  }
+
+  if (days.length >= 3 && days.some((offDay) => !inputs[staff].request.has(offDay))) {
+    runs.push({ start, end: days[days.length - 1], days: [...days] });
+  }
+
+  return runs;
 }
 
 function offScore(schedule, day, staff, offRemaining, inputs, holidays, attempt) {
@@ -395,6 +440,10 @@ function validateSchedule(candidate, inputs, holidays) {
 
     const missed = [...inputs[staff].request].filter((day) => schedule[day - 1].cells[staff] !== "休");
     if (missed.length) errors.push(`スタッフ${staff}の希望公休が反映されていません: ${missed.join(", ")}日。原因: 希望公休固定条件`);
+
+    nonRequestedLongOffRuns(schedule, staff, inputs).forEach((run) => {
+      errors.push(`スタッフ${staff}の${run.start}日〜${run.end}日が3連休以上です。原因: 希望公休以外で3連休以上にしない条件`);
+    });
   });
 
   schedule.forEach((row) => {
@@ -448,6 +497,7 @@ function scoreCandidate(validation, candidate, inputs, holidays) {
   STAFF.forEach((staff) => {
     score += Math.abs(candidate.summary[staff].publicOff - targetPublicOff(staff)) * 5000;
     score += Math.max(0, candidate.summary[staff].maxRun - 3) * 2200;
+    score += nonRequestedLongOffRuns(candidate.schedule, staff, inputs).length * 2400;
     const missed = [...inputs[staff].request].filter((day) => candidate.schedule[day - 1].cells[staff] !== "休").length;
     score += missed * 280;
   });
