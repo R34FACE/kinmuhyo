@@ -33,7 +33,14 @@
           </label>
         </div>
 
-        <p class="hint">日付は「3, 5, 12」のようにカンマ区切りで入力できます。希望公休は必ず休みにし、有給は公休とは別集計、出張・研修は勤務扱いです。</p>
+        <fieldset class="shift-options" aria-describedby="shiftOptionHint">
+          <legend>早帰り・遅番</legend>
+          <label class="checkbox-label"><input id="earlyShiftInput" type="checkbox">早帰りを入れる</label>
+          <label class="checkbox-label"><input id="lateShiftInput" type="checkbox">遅番を入れる</label>
+          <p id="shiftOptionHint" class="hint compact">選択した月だけ、D・G以外のスタッフへ自動で割り当てます。早帰りは休みの前日、遅番は休みの翌日を優先します。</p>
+        </fieldset>
+
+        <p class="hint">日付は「3, 5, 12」のようにカンマ区切りで入力できます。希望公休は必ず休みにし、有給は公休とは別集計、出張・研修は勤務扱いです。希望公休以外では3連休以上にならないよう調整します。</p>
 
         <div id="staffInputs" class="staff-inputs"></div>
       </section>
