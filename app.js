@@ -384,6 +384,9 @@ function applySelectedShiftTypes(schedule, shiftOptions, attempt) {
       const target = findShiftAssignmentDay(schedule, staff, assignment.preferred, attempt);
       if (target) {
         schedule[target - 1].cells[staff] = assignment.type;
+        if (isShiftBetweenDaysOff(schedule, target, staff)) {
+          notices.push(`スタッフ${staff}の${target}日が「休・${assignment.type}・休」の並びです。他に割り当て可能な通常出勤日が少ないため、この配置になりました。`);
+        }
       } else {
         notices.push(`スタッフ${staff}に${assignment.type}を割り当てられる通常出勤日がありませんでした。D・Gは対象外です。`);
       }
@@ -410,6 +413,14 @@ function shiftAssignmentScore(schedule, day, staff, preferred, attempt) {
   const previous = schedule[day - 2];
   const next = schedule[day];
 
+  const previousIsOff = previous && !WORK_TYPES.has(previous.cells[staff]);
+  const nextIsOff = next && !WORK_TYPES.has(next.cells[staff]);
+
+  if (preferred === "beforeOff" && nextIsOff) score += 1000;
+  if (preferred === "afterOff" && previousIsOff) score += 1000;
+  if (previousIsOff) score += 120;
+  if (nextIsOff) score += 120;
+  if (previousIsOff && nextIsOff) score -= 1300;
   if (preferred === "beforeOff" && next && !WORK_TYPES.has(next.cells[staff])) score += 1000;
   if (preferred === "afterOff" && previous && !WORK_TYPES.has(previous.cells[staff])) score += 1000;
   if (previous && !WORK_TYPES.has(previous.cells[staff])) score += 120;
@@ -418,6 +429,12 @@ function shiftAssignmentScore(schedule, day, staff, preferred, attempt) {
   score -= Math.abs(day - (schedule.length + 1) / 2) * 2;
   score += seedRandom(day, staff.charCodeAt(0), preferred.length, attempt) * 35;
   return score;
+}
+
+function isShiftBetweenDaysOff(schedule, day, staff) {
+  const previous = schedule[day - 2];
+  const next = schedule[day];
+  return Boolean(previous && next && !WORK_TYPES.has(previous.cells[staff]) && !WORK_TYPES.has(next.cells[staff]));
 }
 
 function validateSchedule(candidate, inputs, holidays) {
@@ -513,10 +530,12 @@ function shiftPreferencePenalty(schedule) {
       if (row.cells[staff] === "早帰り") {
         const next = schedule[row.day];
         if (!next || WORK_TYPES.has(next.cells[staff])) penalty += 1;
+        if (isShiftBetweenDaysOff(schedule, row.day, staff)) penalty += 8;
       }
       if (row.cells[staff] === "遅番") {
         const previous = schedule[row.day - 2];
         if (!previous || WORK_TYPES.has(previous.cells[staff])) penalty += 1;
+        if (isShiftBetweenDaysOff(schedule, row.day, staff)) penalty += 8;
       }
     });
   });
