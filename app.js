@@ -421,6 +421,10 @@ function shiftAssignmentScore(schedule, day, staff, preferred, attempt) {
   if (previousIsOff) score += 120;
   if (nextIsOff) score += 120;
   if (previousIsOff && nextIsOff) score -= 1300;
+  if (preferred === "beforeOff" && next && !WORK_TYPES.has(next.cells[staff])) score += 1000;
+  if (preferred === "afterOff" && previous && !WORK_TYPES.has(previous.cells[staff])) score += 1000;
+  if (previous && !WORK_TYPES.has(previous.cells[staff])) score += 120;
+  if (next && !WORK_TYPES.has(next.cells[staff])) score += 120;
 
   score -= Math.abs(day - (schedule.length + 1) / 2) * 2;
   score += seedRandom(day, staff.charCodeAt(0), preferred.length, attempt) * 35;
