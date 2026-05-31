@@ -1,6 +1,10 @@
 const STAFF = ["A", "B", "C", "D", "E", "F", "G"];
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
+const SHIFT_VALUES = ["出", "休", "有", "出張", "研修", "早帰り", "遅番"];
 const WORK_TYPES = new Set(["出", "出張", "研修", "早帰り", "遅番"]);
+const REST_TYPES = new Set(["休", "有"]);
+const STAFF_B = "B";
+const MAX_CONSECUTIVE_WORK = 3;
 const SHIFT_ELIGIBLE_STAFF = STAFF.filter((staff) => staff !== "D" && staff !== "G");
 const OFF_TARGETS = { A: 10, B: 10, C: 10, D: 9, E: 10, F: 10, G: 9 };
 const MAX_ATTEMPTS = 1800;
@@ -11,6 +15,7 @@ const els = {
   staffInputs: document.getElementById("staffInputs"),
   earlyShift: document.getElementById("earlyShiftInput"),
   lateShift: document.getElementById("lateShiftInput"),
+  staffBWeekendFixed: document.getElementById("staffBWeekendFixedInput"),
   generate: document.getElementById("generateBtn"),
   export: document.getElementById("exportBtn"),
   clear: document.getElementById("clearBtn"),
@@ -38,6 +43,7 @@ function init() {
   els.export.addEventListener("click", exportExcel);
   els.clear.addEventListener("click", clearInputs);
   els.sample.addEventListener("click", fillSample);
+  els.table.addEventListener("change", handleManualEdit);
 }
 
 function renderStaffInputs() {
@@ -71,14 +77,16 @@ function generate() {
   const daysInMonth = new Date(year, month, 0).getDate();
   const holidays = getJapaneseHolidaySet(year, month);
   const shiftOptions = getShiftOptions();
+  const ruleSettings = getRuleSettings();
   const { inputs, warnings } = getInputs(daysInMonth);
   const fixedWarnings = findInputConflicts(inputs);
+  const staffBInputWarnings = findStaffBBlockedInputWarnings(year, month, inputs, holidays, ruleSettings);
 
   let best = null;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-    const candidate = buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions, attempt);
-    const validation = validateSchedule(candidate, inputs, holidays);
-    const score = scoreCandidate(validation, candidate, inputs, holidays);
+    const candidate = buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions, ruleSettings, attempt);
+    const validation = validateSchedule(candidate, inputs, holidays, ruleSettings);
+    const score = scoreCandidate(validation, candidate, inputs, holidays, ruleSettings);
     if (!best || score < best.score) {
       best = { candidate, validation, score };
       if (score === 0) break;
@@ -92,10 +100,11 @@ function generate() {
     holidays,
     inputs,
     shiftOptions,
+    ruleSettings,
     schedule: best.candidate.schedule,
     summary: best.candidate.summary,
     errors: unique([...warnings, ...fixedWarnings, ...best.validation.errors]),
-    notices: unique([...best.validation.notices, ...best.candidate.shiftNotices]),
+    notices: unique([...staffBInputWarnings, ...best.validation.notices, ...best.candidate.shiftNotices]),
   };
 }
 
@@ -103,6 +112,12 @@ function getShiftOptions() {
   return {
     early: els.earlyShift.checked,
     late: els.lateShift.checked,
+  };
+}
+
+function getRuleSettings() {
+  return {
+    staffBWeekendFixed: els.staffBWeekendFixed ? els.staffBWeekendFixed.checked : true,
   };
 }
 
@@ -146,14 +161,18 @@ function parseDays(value, daysInMonth) {
   return { days, invalid };
 }
 
-function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions, attempt) {
+function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions, ruleSettings, attempt) {
   const schedule = [];
   const offRemaining = Object.fromEntries(STAFF.map((staff) => [staff, targetPublicOff(staff)]));
 
   for (let day = 1; day <= daysInMonth; day += 1) {
     const row = { day, weekday: new Date(year, month - 1, day).getDay(), cells: {} };
     STAFF.forEach((staff) => {
-      if (inputs[staff].request.has(day)) row.cells[staff] = "休";
+      const staffBFixedWorkDay = isStaffBWeekendFixedDay(staff, row, holidays, ruleSettings);
+      if (staffBFixedWorkDay && inputs[staff].trip.has(day)) row.cells[staff] = "出張";
+      else if (staffBFixedWorkDay && inputs[staff].training.has(day)) row.cells[staff] = "研修";
+      else if (staffBFixedWorkDay) row.cells[staff] = "出";
+      else if (inputs[staff].request.has(day)) row.cells[staff] = "休";
       else if (inputs[staff].trip.has(day)) row.cells[staff] = "出張";
       else if (inputs[staff].training.has(day)) row.cells[staff] = "研修";
       else if (inputs[staff].paid.has(day)) row.cells[staff] = "有";
@@ -163,7 +182,7 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
   }
 
   STAFF.forEach((staff) => {
-    offRemaining[staff] = Math.max(0, targetPublicOff(staff) - inputs[staff].request.size);
+    offRemaining[staff] = Math.max(0, targetPublicOff(staff) - reflectedRequestCount(schedule, staff));
   });
 
   for (let day = 1; day <= daysInMonth; day += 1) {
@@ -179,7 +198,7 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
 
     for (let i = 0; i < desired; i += 1) {
       const choices = STAFF
-        .filter((staff) => offRemaining[staff] > 0 && canSetPublicOff(schedule, day, staff, inputs))
+        .filter((staff) => offRemaining[staff] > 0 && canSetPublicOff(schedule, day, staff, inputs, holidays, ruleSettings))
         .map((staff) => ({
           staff,
           score: offScore(schedule, day, staff, offRemaining, inputs, holidays, attempt),
@@ -199,7 +218,7 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
     guard += 1;
     const staff = STAFF.find((name) => offRemaining[name] > 0);
     const choices = schedule
-      .filter((row) => canSetPublicOff(schedule, row.day, staff, inputs))
+      .filter((row) => canSetPublicOff(schedule, row.day, staff, inputs, holidays, ruleSettings))
       .map((row) => ({ row, score: offScore(schedule, row.day, staff, offRemaining, inputs, holidays, attempt) }))
       .sort((a, b) => b.score - a.score);
     if (!choices.length) break;
@@ -207,16 +226,16 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
     offRemaining[staff] -= 1;
   }
 
-  repairLongRuns(schedule, inputs, holidays);
+  repairLongRuns(schedule, inputs, holidays, ruleSettings);
   const shiftNotices = applySelectedShiftTypes(schedule, shiftOptions, attempt);
   const summary = summarize(schedule, inputs, holidays);
-  return { schedule, summary, shiftNotices };
+  return { year, month, schedule, summary, shiftNotices };
 }
 
-function repairLongRuns(schedule, inputs, holidays) {
+function repairLongRuns(schedule, inputs, holidays, ruleSettings) {
   for (let pass = 0; pass < 80; pass += 1) {
     const summary = summarize(schedule, inputs, holidays);
-    const staff = STAFF.find((name) => summary[name].maxRun > 3);
+    const staff = STAFF.find((name) => summary[name].maxRun > MAX_CONSECUTIVE_WORK);
     if (!staff) return;
 
     const run = firstLongRun(schedule, staff);
@@ -225,10 +244,10 @@ function repairLongRuns(schedule, inputs, holidays) {
     let changed = false;
     for (let day = run.start; day <= run.end; day += 1) {
       if (schedule[day - 1].cells[staff] !== "出") continue;
-      if (!canSetPublicOff(schedule, day, staff, inputs)) continue;
+      if (!canSetPublicOff(schedule, day, staff, inputs, holidays, ruleSettings)) continue;
 
       schedule[day - 1].cells[staff] = "休";
-      const swapDay = findPublicOffToRelease(schedule, staff, day, inputs);
+      const swapDay = findPublicOffToRelease(schedule, staff, day, inputs, holidays, ruleSettings);
       if (swapDay) {
         schedule[swapDay - 1].cells[staff] = "出";
       }
@@ -256,7 +275,7 @@ function firstLongRun(schedule, staff) {
     if (WORK_TYPES.has(schedule[index].cells[staff])) {
       if (start === null) start = index + 1;
       length += 1;
-      if (length > 3) return { start, end: index + 1 };
+      if (length > MAX_CONSECUTIVE_WORK) return { start, end: index + 1 };
     } else {
       start = null;
       length = 0;
@@ -265,7 +284,7 @@ function firstLongRun(schedule, staff) {
   return null;
 }
 
-function findPublicOffToRelease(schedule, staff, protectedDay, inputs) {
+function findPublicOffToRelease(schedule, staff, protectedDay, inputs, holidays, ruleSettings) {
   const candidates = schedule
     .filter((row) => row.day !== protectedDay && row.cells[staff] === "休" && !inputs[staff].request.has(row.day))
     .map((row) => {
@@ -274,7 +293,7 @@ function findPublicOffToRelease(schedule, staff, protectedDay, inputs) {
       row.cells[staff] = "休";
       return { day: row.day, maxRun };
     })
-    .filter((item) => item.maxRun <= 3)
+    .filter((item) => item.maxRun <= MAX_CONSECUTIVE_WORK)
     .sort((a, b) => a.maxRun - b.maxRun);
 
   return candidates.length ? candidates[0].day : null;
@@ -297,8 +316,9 @@ function publicOffCapacity(schedule, startDay) {
   return capacity;
 }
 
-function canSetPublicOff(schedule, day, staff, inputs) {
+function canSetPublicOff(schedule, day, staff, inputs, holidays, ruleSettings) {
   const row = schedule[day - 1];
+  if (isStaffBWeekendFixedDay(staff, row, holidays, ruleSettings)) return false;
   if (row.cells[staff] !== "出") return false;
   if (STAFF.filter((name) => !WORK_TYPES.has(row.cells[name])).length >= 3) return false;
 
@@ -437,7 +457,7 @@ function isShiftBetweenDaysOff(schedule, day, staff) {
   return Boolean(previous && next && !WORK_TYPES.has(previous.cells[staff]) && !WORK_TYPES.has(next.cells[staff]));
 }
 
-function validateSchedule(candidate, inputs, holidays) {
+function validateSchedule(candidate, inputs, holidays, ruleSettings) {
   const errors = [];
   const notices = [];
   const { schedule, summary } = candidate;
@@ -451,11 +471,14 @@ function validateSchedule(candidate, inputs, holidays) {
       errors.push(`スタッフ${staff}の公休が${target}回ではありません（現在${summary[staff].publicOff}回）。原因: スタッフ別の公休回数条件`);
     }
 
-    if (summary[staff].maxRun > 3) {
-      errors.push(`スタッフ${staff}の連勤が最大${summary[staff].maxRun}日あります。原因: 最大連勤3日までの条件`);
+    if (summary[staff].maxRun > MAX_CONSECUTIVE_WORK) {
+      errors.push(`スタッフ${staff}の連勤が最大${summary[staff].maxRun}日あります。原因: 最大連勤${MAX_CONSECUTIVE_WORK}日までの条件`);
+      if (staff === STAFF_B && ruleSettings.staffBWeekendFixed) {
+        errors.push(`スタッフB：土日祝出勤固定ルールにより、最大${MAX_CONSECUTIVE_WORK}連勤を超える可能性があります。修正候補：最大連勤を4日に変更する、またはスタッフB土日祝固定ルールを見直してください。`);
+      }
     }
 
-    const missed = [...inputs[staff].request].filter((day) => schedule[day - 1].cells[staff] !== "休");
+    const missed = [...inputs[staff].request].filter((day) => schedule[day - 1].cells[staff] !== "休" && !isStaffBWeekendFixedDay(staff, schedule[day - 1], holidays, ruleSettings));
     if (missed.length) errors.push(`スタッフ${staff}の希望公休が反映されていません: ${missed.join(", ")}日。原因: 希望公休固定条件`);
 
     nonRequestedLongOffRuns(schedule, staff, inputs).forEach((run) => {
@@ -464,6 +487,9 @@ function validateSchedule(candidate, inputs, holidays) {
   });
 
   schedule.forEach((row) => {
+    const staffBViolation = getStaffBWeekendRestViolation(row, holidays, ruleSettings);
+    if (staffBViolation) errors.push(formatStaffBWeekendRestError(row, staffBViolation.value, schedule, holidays, candidate.month));
+
     ["D", "G"].forEach((staff) => {
       if (row.cells[staff] === "早帰り" || row.cells[staff] === "遅番") {
         errors.push(`${row.day}日にスタッフ${staff}へ${row.cells[staff]}が入っています。原因: D・Gは早帰り・遅番の対象外条件`);
@@ -489,6 +515,87 @@ function validateSchedule(candidate, inputs, holidays) {
   return { errors: unique(errors), notices: unique(notices) };
 }
 
+
+function reflectedRequestCount(schedule, staff) {
+  return schedule.filter((row) => row.cells[staff] === "休").length;
+}
+
+function isStaffBWeekendFixedDay(staff, row, holidays, ruleSettings) {
+  return Boolean(ruleSettings?.staffBWeekendFixed && staff === STAFF_B && isWeekendOrHoliday(row, holidays));
+}
+
+function getStaffBWeekendRestViolation(row, holidays, ruleSettings) {
+  if (!isStaffBWeekendFixedDay(STAFF_B, row, holidays, ruleSettings)) return null;
+  const value = row.cells[STAFF_B];
+  return REST_TYPES.has(value) ? { value } : null;
+}
+
+function formatStaffBWeekendRestError(row, value, schedule, holidays, month) {
+  const date = month ? `${month}/${row.day}` : `${row.day}日`;
+  const dayType = dayTypeLabel(row, holidays);
+  const alternatives = weekdayPublicOffCandidates(schedule, row.day, holidays);
+  const alternativeText = alternatives.length
+    ? `スタッフBの代わりの公休候補は${alternatives.join("、")}です`
+    : "スタッフBの代わりの平日公休候補が不足しています";
+  return `${date}（${WEEKDAYS[row.weekday]}）：スタッフB土日祝休み禁止チェック。対象スタッフ: スタッフB、現在の勤務区分: 「${value}」。違反内容: スタッフBは${dayType}に「休」「有」を入れられません。修正候補: スタッフBを「出」に変更してください。${alternativeText}。`;
+}
+
+function weekdayPublicOffCandidates(schedule, excludeDay, holidays) {
+  return schedule
+    .filter((row) => row.day !== excludeDay && !isWeekendOrHoliday(row, holidays) && row.cells[STAFF_B] === "出")
+    .slice(0, 3)
+    .map((row) => `${row.day}日`);
+}
+
+function dayTypeLabel(row, holidays) {
+  if (holidays.has(row.day)) return "祝日";
+  if (row.weekday === 6) return "土曜日";
+  if (row.weekday === 0) return "日曜日";
+  return "平日";
+}
+
+function findStaffBBlockedInputWarnings(year, month, inputs, holidays, ruleSettings) {
+  if (!ruleSettings.staffBWeekendFixed) return [];
+  const warnings = [];
+  [
+    { kind: "request", label: "希望休", blockedLabel: "未反映希望休" },
+    { kind: "paid", label: "有給", blockedLabel: "未反映有給" },
+  ].forEach(({ kind, label, blockedLabel }) => {
+    [...inputs[STAFF_B][kind]].sort((a, b) => a - b).forEach((day) => {
+      const row = { day, weekday: new Date(year, month - 1, day).getDay(), cells: {} };
+      if (!isWeekendOrHoliday(row, holidays)) return;
+      warnings.push(`${blockedLabel}: スタッフBの${month}/${day}は${dayTypeLabel(row, holidays)}のため、${label}を反映できません。勝手に削除せず未反映として残しています。`);
+    });
+  });
+  return warnings;
+}
+
+function renderEditableCell(row, staff, result) {
+  const value = row.cells[staff];
+  const violation = staff === STAFF_B && getStaffBWeekendRestViolation(row, result.holidays, result.ruleSettings);
+  const classes = [cellClass(value), violation ? "rule-violation" : ""].filter(Boolean).join(" ");
+  const options = SHIFT_VALUES.map((type) => `<option value="${type}" ${type === value ? "selected" : ""}>${type}</option>`).join("");
+  return `<td class="${classes}"><select class="shift-select" data-day="${row.day}" data-staff="${staff}" aria-label="${row.day}日 スタッフ${staff}">${options}</select></td>`;
+}
+
+function handleManualEdit(event) {
+  const select = event.target.closest(".shift-select");
+  if (!select || !currentResult) return;
+  const day = Number(select.dataset.day);
+  const staff = select.dataset.staff;
+  currentResult.schedule[day - 1].cells[staff] = select.value;
+  currentResult.summary = summarize(currentResult.schedule, currentResult.inputs, currentResult.holidays);
+  const validation = validateSchedule(
+    { schedule: currentResult.schedule, summary: currentResult.summary, month: currentResult.month },
+    currentResult.inputs,
+    currentResult.holidays,
+    currentResult.ruleSettings,
+  );
+  currentResult.errors = unique(validation.errors);
+  currentResult.notices = unique(validation.notices);
+  renderResult(currentResult);
+}
+
 function findInputConflicts(inputs) {
   const warnings = [];
   STAFF.forEach((staff) => {
@@ -508,14 +615,14 @@ function findInputConflicts(inputs) {
   return warnings;
 }
 
-function scoreCandidate(validation, candidate, inputs, holidays) {
+function scoreCandidate(validation, candidate, inputs, holidays, ruleSettings) {
   let score = validation.errors.length * 10000 + (validation.notices.length + (candidate.shiftNotices?.length || 0)) * 90;
   score += shiftPreferencePenalty(candidate.schedule) * 25;
   STAFF.forEach((staff) => {
     score += Math.abs(candidate.summary[staff].publicOff - targetPublicOff(staff)) * 5000;
-    score += Math.max(0, candidate.summary[staff].maxRun - 3) * 2200;
+    score += Math.max(0, candidate.summary[staff].maxRun - MAX_CONSECUTIVE_WORK) * 2200;
     score += nonRequestedLongOffRuns(candidate.schedule, staff, inputs).length * 2400;
-    const missed = [...inputs[staff].request].filter((day) => candidate.schedule[day - 1].cells[staff] !== "休").length;
+    const missed = [...inputs[staff].request].filter((day) => candidate.schedule[day - 1].cells[staff] !== "休" && !isStaffBWeekendFixedDay(staff, candidate.schedule[day - 1], holidays, ruleSettings)).length;
     score += missed * 280;
   });
   const weekendCounts = STAFF.map((staff) => candidate.summary[staff].weekendHolidayOff);
@@ -545,7 +652,7 @@ function shiftPreferencePenalty(schedule) {
 function summarize(schedule, inputs, holidays) {
   const summary = {};
   STAFF.forEach((staff) => {
-    summary[staff] = { publicOff: 0, paid: 0, weekendHolidayOff: 0, trip: 0, training: 0, early: 0, late: 0, maxRun: 0 };
+    summary[staff] = { publicOff: 0, paid: 0, weekendHolidayOff: 0, weekendHolidayWork: 0, weekendHolidayRestViolations: 0, weekdayPublicOff: 0, weekdayPaid: 0, trip: 0, training: 0, early: 0, late: 0, maxRun: 0 };
   });
 
   schedule.forEach((row) => {
@@ -559,6 +666,18 @@ function summarize(schedule, inputs, holidays) {
       if (value === "遅番") summary[staff].late += 1;
       if ((value === "休" || value === "有") && isWeekendOrHoliday(row, holidays)) {
         summary[staff].weekendHolidayOff += 1;
+      }
+      if (WORK_TYPES.has(value) && isWeekendOrHoliday(row, holidays)) {
+        summary[staff].weekendHolidayWork += 1;
+      }
+      if (staff === STAFF_B && (value === "休" || value === "有") && isWeekendOrHoliday(row, holidays)) {
+        summary[staff].weekendHolidayRestViolations += 1;
+      }
+      if (value === "休" && !isWeekendOrHoliday(row, holidays)) {
+        summary[staff].weekdayPublicOff += 1;
+      }
+      if (value === "有" && !isWeekendOrHoliday(row, holidays)) {
+        summary[staff].weekdayPaid += 1;
       }
     });
   });
@@ -586,6 +705,7 @@ function renderSummary(result) {
         <span>有給: ${item.paid}</span>
         <span>土日祝休: ${item.weekendHolidayOff}</span>
         <span>最大連勤: ${item.maxRun}</span>
+        ${staff === STAFF_B ? `<span>土日祝出勤: ${item.weekendHolidayWork}</span><span>土日祝休み違反: ${item.weekendHolidayRestViolations}</span><span>平日公休: ${item.weekdayPublicOff}</span><span>平日有給: ${item.weekdayPaid}</span>` : ""}
         <span>出張: ${item.trip} / 研修: ${item.training}</span>
         <span>早帰り: ${item.early} / 遅番: ${item.late}</span>
       </div>
@@ -596,7 +716,7 @@ function renderSummary(result) {
 function renderMessages(result) {
   const blocks = [];
   if (!result.errors.length) {
-    blocks.push(`<div class="message ok"><h3>作成できました</h3><p>必須条件を満たす勤務表を作成しました。希望公休はすべて反映しています。</p></div>`);
+    blocks.push(`<div class="message ok"><h3>作成できました</h3><p>必須条件を満たす勤務表を作成しました。未反映の希望がある場合は補足欄を確認してください。</p></div>`);
   } else {
     blocks.push(messageList("エラー一覧", result.errors, "error"));
   }
@@ -632,7 +752,7 @@ function renderTable(result) {
     return `
       <tr>
         <td class="${dayClass}"><span class="day-number">${dateLabel}</span><span class="weekday">${WEEKDAYS[row.weekday]}</span></td>
-        ${STAFF.map((staff) => `<td class="${cellClass(row.cells[staff])}">${row.cells[staff]}</td>`).join("")}
+        ${STAFF.map((staff) => renderEditableCell(row, staff, result)).join("")}
         <td class="count-cell">${workers}</td>
       </tr>
     `;
@@ -688,6 +808,7 @@ function clearInputs() {
   });
   els.earlyShift.checked = false;
   els.lateShift.checked = false;
+  if (els.staffBWeekendFixed) els.staffBWeekendFixed.checked = true;
   currentResult = null;
   els.export.disabled = true;
   renderEmptyState();

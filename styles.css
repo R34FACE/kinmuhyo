@@ -481,3 +481,28 @@ input {
     font-size: 10px;
   }
 }
+
+.shift-select {
+  width: 100%;
+  min-width: 64px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 4px 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-align: center;
+}
+
+.rule-violation {
+  background: #fee2e2 !important;
+  color: var(--danger) !important;
+  outline: 2px solid var(--danger);
+  outline-offset: -2px;
+}
+
+.rule-violation .shift-select {
+  border-color: var(--danger);
+  background: #fff5f5;
+}
