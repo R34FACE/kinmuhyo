@@ -46,6 +46,8 @@
           <p id="staffBWeekendFixedHint" class="hint compact">オンの場合、スタッフBは土日祝に「休」「有」を入れず、勤務扱いになります。</p>
           <label class="checkbox-label"><input id="staffAMonthEdgeFixedInput" type="checkbox" checked>スタッフAを月初・月末勤務にする</label>
           <p class="hint compact">オンの場合、スタッフAは希望休・有給希望がない限り、対象月の1日と月末最終日が勤務になります。</p>
+          <label class="checkbox-label"><input id="previousMonthCarryoverInput" type="checkbox" checked>前月末からの連勤を考慮する</label>
+          <p class="hint compact">オンの場合、前月最終休み日から月初の連勤数を計算し、最大連勤チェックに反映します。</p>
         </fieldset>
 
         <p class="hint">日付は「3, 5, 12」のようにカンマ区切りで入力できます。希望公休は必ず休みにし、有給は公休とは別集計、出張・研修は勤務扱いです。希望公休以外では3連休以上にならないよう調整します。</p>
