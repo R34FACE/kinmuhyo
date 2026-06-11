@@ -3,6 +3,7 @@ const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 const SHIFT_VALUES = ["出", "休", "有", "出張", "研修", "早帰り", "遅番"];
 const WORK_TYPES = new Set(["出", "出張", "研修", "早帰り", "遅番"]);
 const REST_TYPES = new Set(["休", "有"]);
+const STAFF_A = "A";
 const STAFF_B = "B";
 const MAX_CONSECUTIVE_WORK = 3;
 const SHIFT_ELIGIBLE_STAFF = STAFF.filter((staff) => staff !== "D" && staff !== "G");
@@ -16,6 +17,8 @@ const els = {
   earlyShift: document.getElementById("earlyShiftInput"),
   lateShift: document.getElementById("lateShiftInput"),
   staffBWeekendFixed: document.getElementById("staffBWeekendFixedInput"),
+  staffAMonthEdgeFixed: document.getElementById("staffAMonthEdgeFixedInput"),
+  previousMonthCarryover: document.getElementById("previousMonthCarryoverInput"),
   generate: document.getElementById("generateBtn"),
   export: document.getElementById("exportBtn"),
   clear: document.getElementById("clearBtn"),
@@ -51,6 +54,7 @@ function renderStaffInputs() {
     <article class="staff-card">
       <h3>スタッフ${staff}</h3>
       <div class="staff-fields">
+        <label>前月最終休み日<input data-previous-last-off data-staff="${staff}" type="number" min="1" max="31" inputmode="numeric" placeholder="例: 29"></label>
         <label>希望公休<input data-kind="request" data-staff="${staff}" placeholder="例: 3, 8, 22"></label>
         <label>有給<input data-kind="paid" data-staff="${staff}" placeholder="例: 15"></label>
         <label>出張<input data-kind="trip" data-staff="${staff}" placeholder="例: 10, 11"></label>
@@ -75,10 +79,11 @@ function generate() {
   els.month.value = month;
 
   const daysInMonth = new Date(year, month, 0).getDate();
+  const previousMonthDays = getPreviousMonthDays(year, month);
   const holidays = getJapaneseHolidaySet(year, month);
   const shiftOptions = getShiftOptions();
   const ruleSettings = getRuleSettings();
-  const { inputs, warnings } = getInputs(daysInMonth);
+  const { inputs, warnings } = getInputs(daysInMonth, previousMonthDays);
   const fixedWarnings = findInputConflicts(inputs);
   const staffBInputWarnings = findStaffBBlockedInputWarnings(year, month, inputs, holidays, ruleSettings);
 
@@ -97,6 +102,7 @@ function generate() {
     year,
     month,
     daysInMonth,
+    previousMonthDays,
     holidays,
     inputs,
     shiftOptions,
@@ -118,14 +124,27 @@ function getShiftOptions() {
 function getRuleSettings() {
   return {
     staffBWeekendFixed: els.staffBWeekendFixed ? els.staffBWeekendFixed.checked : true,
+    staffAMonthEdgeFixed: els.staffAMonthEdgeFixed ? els.staffAMonthEdgeFixed.checked : true,
+    previousMonthCarryover: els.previousMonthCarryover ? els.previousMonthCarryover.checked : true,
   };
 }
 
-function getInputs(daysInMonth) {
+function getInputs(daysInMonth, previousMonthDays) {
   const inputs = {};
   const warnings = [];
   STAFF.forEach((staff) => {
-    inputs[staff] = { request: new Set(), paid: new Set(), trip: new Set(), training: new Set() };
+    inputs[staff] = { request: new Set(), paid: new Set(), trip: new Set(), training: new Set(), previousLastOff: null };
+  });
+
+  inputs._previousMonthDays = previousMonthDays;
+
+  document.querySelectorAll("[data-previous-last-off][data-staff]").forEach((node) => {
+    const staff = node.dataset.staff;
+    const parsed = parsePreviousLastOff(node.value, previousMonthDays);
+    if (parsed.invalid) {
+      warnings.push(`スタッフ${staff}の「前月最終休み日」に無効な日付があります: ${parsed.invalid}。前月最終日${previousMonthDays}日以内で入力してください。`);
+    }
+    inputs[staff].previousLastOff = parsed.day;
   });
 
   document.querySelectorAll("[data-kind][data-staff]").forEach((node) => {
@@ -161,17 +180,33 @@ function parseDays(value, daysInMonth) {
   return { days, invalid };
 }
 
+
+function parsePreviousLastOff(value, previousMonthDays) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return { day: null, invalid: null };
+  const day = Number(trimmed);
+  if (!Number.isInteger(day) || day < 1 || day > previousMonthDays) {
+    return { day: null, invalid: trimmed };
+  }
+  return { day, invalid: null };
+}
+
+function getPreviousMonthDays(year, month) {
+  return new Date(year, month - 1, 0).getDate();
+}
+
 function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions, ruleSettings, attempt) {
   const schedule = [];
   const offRemaining = Object.fromEntries(STAFF.map((staff) => [staff, targetPublicOff(staff)]));
 
   for (let day = 1; day <= daysInMonth; day += 1) {
-    const row = { day, weekday: new Date(year, month - 1, day).getDay(), cells: {} };
+    const row = { day, weekday: new Date(year, month - 1, day).getDay(), scheduleLength: daysInMonth, cells: {} };
     STAFF.forEach((staff) => {
+      const staffAMonthEdgeWorkDay = isStaffAMonthEdgeFixedDay(staff, row, inputs, ruleSettings);
       const staffBFixedWorkDay = isStaffBWeekendFixedDay(staff, row, holidays, ruleSettings);
-      if (staffBFixedWorkDay && inputs[staff].trip.has(day)) row.cells[staff] = "出張";
-      else if (staffBFixedWorkDay && inputs[staff].training.has(day)) row.cells[staff] = "研修";
-      else if (staffBFixedWorkDay) row.cells[staff] = "出";
+      if ((staffAMonthEdgeWorkDay || staffBFixedWorkDay) && inputs[staff].trip.has(day)) row.cells[staff] = "出張";
+      else if ((staffAMonthEdgeWorkDay || staffBFixedWorkDay) && inputs[staff].training.has(day)) row.cells[staff] = "研修";
+      else if (staffAMonthEdgeWorkDay || staffBFixedWorkDay) row.cells[staff] = "出";
       else if (inputs[staff].request.has(day)) row.cells[staff] = "休";
       else if (inputs[staff].trip.has(day)) row.cells[staff] = "出張";
       else if (inputs[staff].training.has(day)) row.cells[staff] = "研修";
@@ -201,7 +236,7 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
         .filter((staff) => offRemaining[staff] > 0 && canSetPublicOff(schedule, day, staff, inputs, holidays, ruleSettings))
         .map((staff) => ({
           staff,
-          score: offScore(schedule, day, staff, offRemaining, inputs, holidays, attempt),
+          score: offScore(schedule, day, staff, offRemaining, inputs, holidays, ruleSettings, attempt),
         }))
         .sort((a, b) => b.score - a.score);
 
@@ -219,7 +254,7 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
     const staff = STAFF.find((name) => offRemaining[name] > 0);
     const choices = schedule
       .filter((row) => canSetPublicOff(schedule, row.day, staff, inputs, holidays, ruleSettings))
-      .map((row) => ({ row, score: offScore(schedule, row.day, staff, offRemaining, inputs, holidays, attempt) }))
+      .map((row) => ({ row, score: offScore(schedule, row.day, staff, offRemaining, inputs, holidays, ruleSettings, attempt) }))
       .sort((a, b) => b.score - a.score);
     if (!choices.length) break;
     choices[0].row.cells[staff] = "休";
@@ -227,18 +262,18 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
   }
 
   repairLongRuns(schedule, inputs, holidays, ruleSettings);
-  const shiftNotices = applySelectedShiftTypes(schedule, shiftOptions, attempt);
-  const summary = summarize(schedule, inputs, holidays);
+  const shiftNotices = applySelectedShiftTypes(schedule, shiftOptions, inputs, ruleSettings, attempt);
+  const summary = summarize(schedule, inputs, holidays, ruleSettings);
   return { year, month, schedule, summary, shiftNotices };
 }
 
 function repairLongRuns(schedule, inputs, holidays, ruleSettings) {
   for (let pass = 0; pass < 80; pass += 1) {
-    const summary = summarize(schedule, inputs, holidays);
+    const summary = summarize(schedule, inputs, holidays, ruleSettings);
     const staff = STAFF.find((name) => summary[name].maxRun > MAX_CONSECUTIVE_WORK);
     if (!staff) return;
 
-    const run = firstLongRun(schedule, staff);
+    const run = firstLongRun(schedule, staff, inputs, ruleSettings);
     if (!run) return;
 
     let changed = false;
@@ -252,7 +287,7 @@ function repairLongRuns(schedule, inputs, holidays, ruleSettings) {
         schedule[swapDay - 1].cells[staff] = "出";
       }
 
-      const nextSummary = summarize(schedule, inputs, holidays);
+      const nextSummary = summarize(schedule, inputs, holidays, ruleSettings);
       const validCounts = nextSummary[staff].publicOff === targetPublicOff(staff);
       const improved = nextSummary[staff].maxRun < summary[staff].maxRun;
       if (validCounts && improved && basicDailyRulesPass(schedule)) {
@@ -268,9 +303,9 @@ function repairLongRuns(schedule, inputs, holidays, ruleSettings) {
   }
 }
 
-function firstLongRun(schedule, staff) {
-  let start = null;
-  let length = 0;
+function firstLongRun(schedule, staff, inputs, ruleSettings = {}) {
+  let start = previousCarryoverDays(staff, inputs, ruleSettings) > 0 ? 1 : null;
+  let length = previousCarryoverDays(staff, inputs, ruleSettings);
   for (let index = 0; index < schedule.length; index += 1) {
     if (WORK_TYPES.has(schedule[index].cells[staff])) {
       if (start === null) start = index + 1;
@@ -289,7 +324,7 @@ function findPublicOffToRelease(schedule, staff, protectedDay, inputs, holidays,
     .filter((row) => row.day !== protectedDay && row.cells[staff] === "休" && !inputs[staff].request.has(row.day))
     .map((row) => {
       row.cells[staff] = "出";
-      const maxRun = maxConsecutiveWork(schedule, staff);
+      const maxRun = maxConsecutiveWork(schedule, staff, inputs, ruleSettings);
       row.cells[staff] = "休";
       return { day: row.day, maxRun };
     })
@@ -318,6 +353,7 @@ function publicOffCapacity(schedule, startDay) {
 
 function canSetPublicOff(schedule, day, staff, inputs, holidays, ruleSettings) {
   const row = schedule[day - 1];
+  if (isStaffAMonthEdgeFixedDay(staff, row, inputs, ruleSettings)) return false;
   if (isStaffBWeekendFixedDay(staff, row, holidays, ruleSettings)) return false;
   if (row.cells[staff] !== "出") return false;
   if (STAFF.filter((name) => !WORK_TYPES.has(row.cells[name])).length >= 3) return false;
@@ -375,20 +411,20 @@ function nonRequestedLongOffRuns(schedule, staff, inputs) {
   return runs;
 }
 
-function offScore(schedule, day, staff, offRemaining, inputs, holidays, attempt) {
+function offScore(schedule, day, staff, offRemaining, inputs, holidays, ruleSettings, attempt) {
   const row = schedule[day - 1];
   let score = 0;
   if (inputs[staff].request.has(day)) score += 1200;
   if (isWeekendOrHoliday(row, holidays)) score += 80 - weekendHolidayOffCount(schedule, staff, holidays) * 12;
-  if (currentRunBefore(schedule, day, staff) >= 3) score += 900;
-  if (wouldCreateLongRun(schedule, day, staff)) score += 180;
+  if (currentRunBefore(schedule, day, staff, inputs, ruleSettings) >= 3) score += 900;
+  if (wouldCreateLongRun(schedule, day, staff, inputs, ruleSettings)) score += 180;
   score += offRemaining[staff] * 35;
   score -= STAFF.filter((name) => !WORK_TYPES.has(row.cells[name])).length * 20;
   score += seedRandom(day, staff.charCodeAt(0), attempt) * 45;
   return score;
 }
 
-function applySelectedShiftTypes(schedule, shiftOptions, attempt) {
+function applySelectedShiftTypes(schedule, shiftOptions, inputs, ruleSettings, attempt) {
   const notices = [];
   const assignments = [];
 
@@ -401,7 +437,7 @@ function applySelectedShiftTypes(schedule, shiftOptions, attempt) {
 
   assignments.forEach((assignment) => {
     SHIFT_ELIGIBLE_STAFF.forEach((staff) => {
-      const target = findShiftAssignmentDay(schedule, staff, assignment.preferred, attempt);
+      const target = findShiftAssignmentDay(schedule, staff, assignment.preferred, inputs, ruleSettings, attempt);
       if (target) {
         schedule[target - 1].cells[staff] = assignment.type;
         if (isShiftBetweenDaysOff(schedule, target, staff)) {
@@ -416,9 +452,9 @@ function applySelectedShiftTypes(schedule, shiftOptions, attempt) {
   return notices;
 }
 
-function findShiftAssignmentDay(schedule, staff, preferred, attempt) {
+function findShiftAssignmentDay(schedule, staff, preferred, inputs, ruleSettings, attempt) {
   const candidates = schedule
-    .filter((row) => row.cells[staff] === "出")
+    .filter((row) => row.cells[staff] === "出" && !isStaffAMonthEdgeProtectedShiftDay(schedule, row.day, staff, inputs, ruleSettings))
     .map((row) => ({
       day: row.day,
       score: shiftAssignmentScore(schedule, row.day, staff, preferred, attempt),
@@ -462,6 +498,14 @@ function validateSchedule(candidate, inputs, holidays, ruleSettings) {
   const notices = [];
   const { schedule, summary } = candidate;
 
+  if (ruleSettings?.staffAMonthEdgeFixed) {
+    errors.push(...findStaffAMonthEdgeErrors(schedule, inputs, candidate.month));
+    notices.push(...findStaffAMonthEdgeNotices(schedule, inputs, candidate.month));
+  }
+  if (ruleSettings?.previousMonthCarryover) {
+    errors.push(...findPreviousMonthCarryoverErrors(schedule, inputs, candidate.month, ruleSettings, holidays));
+  }
+
   STAFF.forEach((staff) => {
     const target = targetPublicOff(staff);
     if (inputs[staff].request.size > target) {
@@ -469,10 +513,16 @@ function validateSchedule(candidate, inputs, holidays, ruleSettings) {
     }
     if (summary[staff].publicOff !== target) {
       errors.push(`スタッフ${staff}の公休が${target}回ではありません（現在${summary[staff].publicOff}回）。原因: スタッフ別の公休回数条件`);
+      if (staff === STAFF_A && ruleSettings.staffAMonthEdgeFixed && hasStaffAMonthEdgeFixedWork(schedule, inputs)) {
+        errors.push(`スタッフA：月初・月末勤務固定により、公休日数${target}回の調整が難しくなっています。修正候補：スタッフAの別の平日に公休を移動してください。`);
+      }
     }
 
     if (summary[staff].maxRun > MAX_CONSECUTIVE_WORK) {
       errors.push(`スタッフ${staff}の連勤が最大${summary[staff].maxRun}日あります。原因: 最大連勤${MAX_CONSECUTIVE_WORK}日までの条件`);
+      if (staff === STAFF_A && ruleSettings.staffAMonthEdgeFixed && hasStaffAMonthEdgeFixedWork(schedule, inputs)) {
+        errors.push(`スタッフA：月初・月末勤務固定により、最大${MAX_CONSECUTIVE_WORK}連勤を超える可能性があります。修正候補：スタッフAの別の平日に公休を移動してください。`);
+      }
       if (staff === STAFF_B && ruleSettings.staffBWeekendFixed) {
         errors.push(`スタッフB：土日祝出勤固定ルールにより、最大${MAX_CONSECUTIVE_WORK}連勤を超える可能性があります。修正候補：最大連勤を4日に変更する、またはスタッフB土日祝固定ルールを見直してください。`);
       }
@@ -570,9 +620,183 @@ function findStaffBBlockedInputWarnings(year, month, inputs, holidays, ruleSetti
   return warnings;
 }
 
+
+function monthEdgeDays(schedule) {
+  return [1, schedule.length].filter((day, index, days) => days.indexOf(day) === index);
+}
+
+function monthEdgeLabel(schedule, day) {
+  return day === schedule.length ? "月末最終日" : "月初1日";
+}
+
+function isStaffAMonthEdgeDay(schedule, day) {
+  return day === 1 || day === schedule.length;
+}
+
+function hasStaffAMonthEdgeException(inputs, day) {
+  return inputs?.[STAFF_A]?.request?.has(day) || inputs?.[STAFF_A]?.paid?.has(day);
+}
+
+function isStaffAMonthEdgeFixedDay(staff, row, inputs, ruleSettings) {
+  if (!ruleSettings?.staffAMonthEdgeFixed || staff !== STAFF_A || !row) return false;
+  const scheduleLength = row.scheduleLength || row._scheduleLength;
+  const isEdge = row.day === 1 || (scheduleLength ? row.day === scheduleLength : false);
+  return isEdge && !hasStaffAMonthEdgeException(inputs, row.day);
+}
+
+
+function isStaffAMonthEdgeProtectedShiftDay(schedule, day, staff, inputs, ruleSettings) {
+  if (!ruleSettings?.staffAMonthEdgeFixed || staff !== STAFF_A || !isStaffAMonthEdgeDay(schedule, day)) return false;
+  return !hasStaffAMonthEdgeException(inputs, day);
+}
+
+function getStaffAMonthEdgeViolation(row, staff, inputs, ruleSettings) {
+  if (!ruleSettings?.staffAMonthEdgeFixed || staff !== STAFF_A || !row) return null;
+  const scheduleLength = row.scheduleLength || currentResult?.schedule?.length;
+  if (row.day !== 1 && row.day !== scheduleLength) return null;
+  if (hasStaffAMonthEdgeException(inputs, row.day)) return null;
+  const value = row.cells[STAFF_A];
+  return ["出", "出張", "研修"].includes(value) ? null : { value };
+}
+
+function findStaffAMonthEdgeErrors(schedule, inputs, month) {
+  return monthEdgeDays(schedule).flatMap((day) => {
+    const row = schedule[day - 1];
+    const violation = getStaffAMonthEdgeViolation(row, STAFF_A, inputs, { staffAMonthEdgeFixed: true });
+    if (!violation) return [];
+    const date = month ? `${month}/${day}` : `${day}日`;
+    const detail = violation.value === "休" || violation.value === "有"
+      ? `「${violation.value}」になっています`
+      : `勤務扱い（出・出張・研修）ではない「${violation.value}」になっています`;
+    const editHint = day === 1
+      ? "エラー：スタッフAは希望休がない限り、月初1日は勤務です"
+      : "エラー：スタッフAは希望休がない限り、月末最終日は勤務です";
+    return [`${date}：スタッフA月初月末勤務チェック。スタッフAは${monthEdgeLabel(schedule, day)}勤務ルールですが${detail}。${editHint}`];
+  });
+}
+
+function findStaffAMonthEdgeNotices(schedule, inputs, month) {
+  return monthEdgeDays(schedule).flatMap((day) => {
+    const value = schedule[day - 1].cells[STAFF_A];
+    const date = month ? `${month}/${day}` : `${day}日`;
+    const edgeShort = day === 1 ? "月初" : "月末";
+    if (inputs[STAFF_A].request.has(day) && value === "休") {
+      return [`${date}：スタッフA月初月末勤務チェック。スタッフAは${edgeShort}勤務対象日ですが、希望休があるため休みを許可しています`];
+    }
+    if (inputs[STAFF_A].paid.has(day) && value === "有") {
+      return [`${date}：スタッフA月初月末勤務チェック。スタッフAは${edgeShort}勤務対象日ですが、有給希望があるため有給を許可しています`];
+    }
+    return [];
+  });
+}
+
+function staffAMonthEdgeStats(schedule, inputs) {
+  const stats = {
+    firstDayShift: schedule[0]?.cells[STAFF_A] || "-",
+    lastDayShift: schedule[schedule.length - 1]?.cells[STAFF_A] || "-",
+    monthEdgeViolations: 0,
+    monthEdgeRequestExceptions: 0,
+    monthEdgePaidExceptions: 0,
+  };
+  monthEdgeDays(schedule).forEach((day) => {
+    const row = schedule[day - 1];
+    const value = row.cells[STAFF_A];
+    if (inputs[STAFF_A].request.has(day) && value === "休") stats.monthEdgeRequestExceptions += 1;
+    else if (inputs[STAFF_A].paid.has(day) && value === "有") stats.monthEdgePaidExceptions += 1;
+    else if (!["出", "出張", "研修"].includes(value)) stats.monthEdgeViolations += 1;
+  });
+  return stats;
+}
+
+function hasStaffAMonthEdgeFixedWork(schedule, inputs) {
+  return monthEdgeDays(schedule).some((day) => !hasStaffAMonthEdgeException(inputs, day));
+}
+
+
+function hasPreviousLastOffInput(staff, inputs) {
+  return Number.isInteger(inputs?.[staff]?.previousLastOff);
+}
+
+function previousCarryoverDays(staff, inputs, ruleSettings = {}) {
+  if (!ruleSettings?.previousMonthCarryover || !hasPreviousLastOffInput(staff, inputs)) return 0;
+  return Math.max(0, (inputs._previousMonthDays || 0) - inputs[staff].previousLastOff);
+}
+
+function monthStartRunInfo(schedule, staff, inputs, ruleSettings = {}) {
+  const carryover = previousCarryoverDays(staff, inputs, ruleSettings);
+  let run = carryover;
+  let maxRun = 0;
+  let firstViolation = null;
+
+  for (let day = 1; day <= schedule.length; day += 1) {
+    const value = schedule[day - 1].cells[staff];
+    if (!WORK_TYPES.has(value)) break;
+    run += 1;
+    maxRun = Math.max(maxRun, run);
+    if (!firstViolation && run > MAX_CONSECUTIVE_WORK) {
+      firstViolation = { day, run, value };
+    }
+  }
+
+  return { carryover, maxRun, firstViolation };
+}
+
+function getPreviousMonthCarryoverViolation(schedule, day, staff, inputs, ruleSettings = {}) {
+  if (!ruleSettings?.previousMonthCarryover || !hasPreviousLastOffInput(staff, inputs)) return null;
+  const info = monthStartRunInfo(schedule, staff, inputs, ruleSettings);
+  return info.firstViolation?.day === day ? info.firstViolation : null;
+}
+
+function findPreviousMonthCarryoverErrors(schedule, inputs, month, ruleSettings = {}, holidays = new Set()) {
+  return STAFF.flatMap((staff) => {
+    if (!hasPreviousLastOffInput(staff, inputs)) return [];
+    const info = monthStartRunInfo(schedule, staff, inputs, ruleSettings);
+    if (!info.firstViolation) return [];
+    const day = info.firstViolation.day;
+    const date = month ? `${month}/${day}` : `${day}日`;
+    const suggestion = previousCarryoverSuggestion(schedule, day, staff, inputs, ruleSettings, holidays);
+    return [`スタッフ${staff}：前月末からの連勤を含めると、${date}時点で${info.firstViolation.run}連勤です。前月最終休み日: ${inputs[staff].previousLastOff}日、前月末時点の持ち越し連勤: ${info.carryover}日、最大連勤数: ${MAX_CONSECUTIVE_WORK}日。修正候補: ${suggestion}`];
+  });
+}
+
+function previousCarryoverSuggestion(schedule, violationDay, staff, inputs, ruleSettings = {}, holidays = new Set()) {
+  if (canSetPublicOff(schedule, violationDay, staff, inputs, holidays, ruleSettings)) {
+    return `スタッフ${staff}を${violationDay}日に休みにすると、最大${MAX_CONSECUTIVE_WORK}連勤以内に収まります`;
+  }
+  const alternative = schedule
+    .slice(0, Math.min(schedule.length, violationDay + 2))
+    .find((row) => canSetPublicOff(schedule, row.day, staff, inputs, holidays, ruleSettings));
+  if (alternative) return `スタッフ${staff}の${alternative.day}日を休みにしてください`;
+  if (staff === STAFF_A && ruleSettings.staffAMonthEdgeFixed && violationDay === 1) {
+    return "スタッフAの月初勤務ルールと最大連勤ルールが衝突しています。前月最終休み日の入力、またはスタッフAの希望休を確認してください";
+  }
+  if (staff === STAFF_B && ruleSettings.staffBWeekendFixed) {
+    return "スタッフBの土日祝固定により回避できない可能性があります。前月最終休み日の入力を確認してください";
+  }
+  return "前月最終休み日の入力を確認し、月初の別日に公休を移動してください";
+}
+
+function previousMonthCarryoverStats(schedule, staff, inputs, ruleSettings = {}) {
+  const hasInput = hasPreviousLastOffInput(staff, inputs);
+  const info = monthStartRunInfo(schedule, staff, inputs, ruleSettings);
+  return {
+    previousLastOff: hasInput ? inputs[staff].previousLastOff : null,
+    previousLastOffLabel: hasInput ? `${inputs[staff].previousLastOff}日` : "未入力",
+    previousCarryover: hasInput && ruleSettings?.previousMonthCarryover ? info.carryover : null,
+    previousCarryoverLabel: hasInput && ruleSettings?.previousMonthCarryover ? `${info.carryover}日` : "-",
+    monthStartMaxRun: hasInput && ruleSettings?.previousMonthCarryover ? info.maxRun : null,
+    monthStartMaxRunLabel: hasInput && ruleSettings?.previousMonthCarryover ? `${info.maxRun}連勤` : "-",
+    monthStartCarryoverErrors: info.firstViolation ? 1 : 0,
+    monthStartCarryoverJudgement: !hasInput ? "未入力" : (ruleSettings?.previousMonthCarryover ? (info.firstViolation ? "エラー" : "OK") : "未使用"),
+  };
+}
+
 function renderEditableCell(row, staff, result) {
   const value = row.cells[staff];
-  const violation = staff === STAFF_B && getStaffBWeekendRestViolation(row, result.holidays, result.ruleSettings);
+  const staffBViolation = staff === STAFF_B && getStaffBWeekendRestViolation(row, result.holidays, result.ruleSettings);
+  const staffAViolation = getStaffAMonthEdgeViolation(row, staff, result.inputs, result.ruleSettings);
+  const carryoverViolation = getPreviousMonthCarryoverViolation(result.schedule, row.day, staff, result.inputs, result.ruleSettings);
+  const violation = staffBViolation || staffAViolation || carryoverViolation;
   const classes = [cellClass(value), violation ? "rule-violation" : ""].filter(Boolean).join(" ");
   const options = SHIFT_VALUES.map((type) => `<option value="${type}" ${type === value ? "selected" : ""}>${type}</option>`).join("");
   return `<td class="${classes}"><select class="shift-select" data-day="${row.day}" data-staff="${staff}" aria-label="${row.day}日 スタッフ${staff}">${options}</select></td>`;
@@ -584,7 +808,7 @@ function handleManualEdit(event) {
   const day = Number(select.dataset.day);
   const staff = select.dataset.staff;
   currentResult.schedule[day - 1].cells[staff] = select.value;
-  currentResult.summary = summarize(currentResult.schedule, currentResult.inputs, currentResult.holidays);
+  currentResult.summary = summarize(currentResult.schedule, currentResult.inputs, currentResult.holidays, currentResult.ruleSettings);
   const validation = validateSchedule(
     { schedule: currentResult.schedule, summary: currentResult.summary, month: currentResult.month },
     currentResult.inputs,
@@ -649,7 +873,7 @@ function shiftPreferencePenalty(schedule) {
   return penalty;
 }
 
-function summarize(schedule, inputs, holidays) {
+function summarize(schedule, inputs, holidays, ruleSettings = {}) {
   const summary = {};
   STAFF.forEach((staff) => {
     summary[staff] = { publicOff: 0, paid: 0, weekendHolidayOff: 0, weekendHolidayWork: 0, weekendHolidayRestViolations: 0, weekdayPublicOff: 0, weekdayPaid: 0, trip: 0, training: 0, early: 0, late: 0, maxRun: 0 };
@@ -683,8 +907,10 @@ function summarize(schedule, inputs, holidays) {
   });
 
   STAFF.forEach((staff) => {
-    summary[staff].maxRun = maxConsecutiveWork(schedule, staff);
+    summary[staff].maxRun = maxConsecutiveWork(schedule, staff, inputs, ruleSettings);
+    Object.assign(summary[staff], previousMonthCarryoverStats(schedule, staff, inputs, ruleSettings));
   });
+  Object.assign(summary[STAFF_A], staffAMonthEdgeStats(schedule, inputs));
   return summary;
 }
 
@@ -705,6 +931,11 @@ function renderSummary(result) {
         <span>有給: ${item.paid}</span>
         <span>土日祝休: ${item.weekendHolidayOff}</span>
         <span>最大連勤: ${item.maxRun}</span>
+        <span>前月最終休み: ${item.previousLastOffLabel}</span>
+        <span>持ち越し連勤: ${item.previousCarryoverLabel}</span>
+        <span>月初最大連勤: ${item.monthStartMaxRunLabel}</span>
+        <span>月初連勤判定: ${item.monthStartCarryoverJudgement}</span>
+        ${staff === STAFF_A ? `<span>月初1日: ${item.firstDayShift}</span><span>月末最終日: ${item.lastDayShift}</span><span>月初月末違反: ${item.monthEdgeViolations}</span><span>希望休例外: ${item.monthEdgeRequestExceptions}</span><span>有給希望例外: ${item.monthEdgePaidExceptions}</span>` : ""}
         ${staff === STAFF_B ? `<span>土日祝出勤: ${item.weekendHolidayWork}</span><span>土日祝休み違反: ${item.weekendHolidayRestViolations}</span><span>平日公休: ${item.weekdayPublicOff}</span><span>平日有給: ${item.weekdayPaid}</span>` : ""}
         <span>出張: ${item.trip} / 研修: ${item.training}</span>
         <span>早帰り: ${item.early} / 遅番: ${item.late}</span>
@@ -780,10 +1011,10 @@ function exportExcel() {
       return `<tr><td>${row.day}日(${WEEKDAYS[row.weekday]})</td>${STAFF.map((staff) => `<td>${row.cells[staff]}</td>`).join("")}<td>${workers}</td></tr>`;
     }),
     `<tr></tr>`,
-    `<tr><th>スタッフ</th><th>公休</th><th>有給</th><th>土日祝休</th><th>最大連勤</th><th>出張</th><th>研修</th><th>早帰り</th><th>遅番</th></tr>`,
+    `<tr><th>スタッフ</th><th>公休</th><th>有給</th><th>土日祝休</th><th>最大連勤</th><th>前月最終休み</th><th>持ち越し連勤</th><th>月初最大連勤</th><th>月初連勤エラー</th><th>月初1日</th><th>月末最終日</th><th>月初月末違反</th><th>希望休例外</th><th>有給希望例外</th><th>出張</th><th>研修</th><th>早帰り</th><th>遅番</th></tr>`,
     ...STAFF.map((staff) => {
       const item = currentResult.summary[staff];
-      return `<tr><td>${staff}</td><td>${item.publicOff}</td><td>${item.paid}</td><td>${item.weekendHolidayOff}</td><td>${item.maxRun}</td><td>${item.trip}</td><td>${item.training}</td><td>${item.early}</td><td>${item.late}</td></tr>`;
+      return `<tr><td>${staff}</td><td>${item.publicOff}</td><td>${item.paid}</td><td>${item.weekendHolidayOff}</td><td>${item.maxRun}</td><td>${item.previousLastOffLabel}</td><td>${item.previousCarryoverLabel}</td><td>${item.monthStartMaxRunLabel}</td><td>${item.monthStartCarryoverErrors}</td><td>${item.firstDayShift || "-"}</td><td>${item.lastDayShift || "-"}</td><td>${item.monthEdgeViolations || 0}</td><td>${item.monthEdgeRequestExceptions || 0}</td><td>${item.monthEdgePaidExceptions || 0}</td><td>${item.trip}</td><td>${item.training}</td><td>${item.early}</td><td>${item.late}</td></tr>`;
     }),
   ];
 
@@ -803,12 +1034,14 @@ function exportExcel() {
 }
 
 function clearInputs() {
-  document.querySelectorAll("[data-kind][data-staff]").forEach((node) => {
+  document.querySelectorAll("[data-kind][data-staff], [data-previous-last-off][data-staff]").forEach((node) => {
     node.value = "";
   });
   els.earlyShift.checked = false;
   els.lateShift.checked = false;
   if (els.staffBWeekendFixed) els.staffBWeekendFixed.checked = true;
+  if (els.staffAMonthEdgeFixed) els.staffAMonthEdgeFixed.checked = true;
+  if (els.previousMonthCarryover) els.previousMonthCarryover.checked = true;
   currentResult = null;
   els.export.disabled = true;
   renderEmptyState();
@@ -817,8 +1050,8 @@ function clearInputs() {
 function fillSample() {
   clearInputs();
   const sample = {
-    A: { request: "2, 9, 18", paid: "23", trip: "6", training: "" },
-    B: { request: "3, 10, 24", paid: "", trip: "", training: "14" },
+    A: { previousLastOff: "29", request: "2, 9, 18", paid: "23", trip: "6", training: "" },
+    B: { previousLastOff: "30", request: "3, 10, 24", paid: "", trip: "", training: "14" },
     C: { request: "4, 11, 22", paid: "16", trip: "", training: "" },
     D: { request: "5, 12, 26", paid: "", trip: "19", training: "" },
     E: { request: "1, 15, 27", paid: "", trip: "", training: "8" },
@@ -827,7 +1060,8 @@ function fillSample() {
   };
   Object.entries(sample).forEach(([staff, values]) => {
     Object.entries(values).forEach(([kind, value]) => {
-      document.querySelector(`[data-staff="${staff}"][data-kind="${kind}"]`).value = value;
+      const selector = kind === "previousLastOff" ? `[data-staff="${staff}"][data-previous-last-off]` : `[data-staff="${staff}"][data-kind="${kind}"]`;
+      document.querySelector(selector).value = value;
     });
   });
 }
@@ -927,9 +1161,9 @@ function isWeekendOrHoliday(row, holidays) {
   return row.weekday === 0 || row.weekday === 6 || holidays.has(row.day);
 }
 
-function maxConsecutiveWork(schedule, staff) {
+function maxConsecutiveWork(schedule, staff, inputs, ruleSettings = {}) {
   let max = 0;
-  let run = 0;
+  let run = previousCarryoverDays(staff, inputs, ruleSettings);
   schedule.forEach((row) => {
     if (WORK_TYPES.has(row.cells[staff])) {
       run += 1;
@@ -941,27 +1175,36 @@ function maxConsecutiveWork(schedule, staff) {
   return max;
 }
 
-function currentRunBefore(schedule, day, staff) {
+function currentRunBefore(schedule, day, staff, inputs, ruleSettings = {}) {
   let run = 0;
+  let reachedMonthStart = true;
   for (let d = day - 1; d >= 1; d -= 1) {
-    if (!WORK_TYPES.has(schedule[d - 1].cells[staff])) break;
+    if (!WORK_TYPES.has(schedule[d - 1].cells[staff])) {
+      reachedMonthStart = false;
+      break;
+    }
     run += 1;
   }
-  return run;
+  return run + (reachedMonthStart ? previousCarryoverDays(staff, inputs, ruleSettings) : 0);
 }
 
-function wouldCreateLongRun(schedule, day, staff) {
+function wouldCreateLongRun(schedule, day, staff, inputs, ruleSettings = {}) {
   let before = 0;
+  let reachedMonthStart = true;
   let after = 0;
   for (let d = day - 1; d >= 1; d -= 1) {
-    if (!WORK_TYPES.has(schedule[d - 1].cells[staff])) break;
+    if (!WORK_TYPES.has(schedule[d - 1].cells[staff])) {
+      reachedMonthStart = false;
+      break;
+    }
     before += 1;
   }
+  if (reachedMonthStart) before += previousCarryoverDays(staff, inputs, ruleSettings);
   for (let d = day + 1; d <= schedule.length; d += 1) {
     if (!WORK_TYPES.has(schedule[d - 1].cells[staff])) break;
     after += 1;
   }
-  return before + after >= 3;
+  return before + after >= MAX_CONSECUTIVE_WORK;
 }
 
 function weekendHolidayOffCount(schedule, staff, holidays) {
