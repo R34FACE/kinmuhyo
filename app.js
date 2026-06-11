@@ -3,6 +3,7 @@ const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 const SHIFT_VALUES = ["出", "休", "有", "出張", "研修", "早帰り", "遅番"];
 const WORK_TYPES = new Set(["出", "出張", "研修", "早帰り", "遅番"]);
 const REST_TYPES = new Set(["休", "有"]);
+const STAFF_A = "A";
 const STAFF_B = "B";
 const MAX_CONSECUTIVE_WORK = 3;
 const SHIFT_ELIGIBLE_STAFF = STAFF.filter((staff) => staff !== "D" && staff !== "G");
@@ -16,6 +17,7 @@ const els = {
   earlyShift: document.getElementById("earlyShiftInput"),
   lateShift: document.getElementById("lateShiftInput"),
   staffBWeekendFixed: document.getElementById("staffBWeekendFixedInput"),
+  staffAMonthEdgeFixed: document.getElementById("staffAMonthEdgeFixedInput"),
   generate: document.getElementById("generateBtn"),
   export: document.getElementById("exportBtn"),
   clear: document.getElementById("clearBtn"),
@@ -118,6 +120,7 @@ function getShiftOptions() {
 function getRuleSettings() {
   return {
     staffBWeekendFixed: els.staffBWeekendFixed ? els.staffBWeekendFixed.checked : true,
+    staffAMonthEdgeFixed: els.staffAMonthEdgeFixed ? els.staffAMonthEdgeFixed.checked : true,
   };
 }
 
@@ -166,12 +169,13 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
   const offRemaining = Object.fromEntries(STAFF.map((staff) => [staff, targetPublicOff(staff)]));
 
   for (let day = 1; day <= daysInMonth; day += 1) {
-    const row = { day, weekday: new Date(year, month - 1, day).getDay(), cells: {} };
+    const row = { day, weekday: new Date(year, month - 1, day).getDay(), scheduleLength: daysInMonth, cells: {} };
     STAFF.forEach((staff) => {
+      const staffAMonthEdgeWorkDay = isStaffAMonthEdgeFixedDay(staff, row, inputs, ruleSettings);
       const staffBFixedWorkDay = isStaffBWeekendFixedDay(staff, row, holidays, ruleSettings);
-      if (staffBFixedWorkDay && inputs[staff].trip.has(day)) row.cells[staff] = "出張";
-      else if (staffBFixedWorkDay && inputs[staff].training.has(day)) row.cells[staff] = "研修";
-      else if (staffBFixedWorkDay) row.cells[staff] = "出";
+      if ((staffAMonthEdgeWorkDay || staffBFixedWorkDay) && inputs[staff].trip.has(day)) row.cells[staff] = "出張";
+      else if ((staffAMonthEdgeWorkDay || staffBFixedWorkDay) && inputs[staff].training.has(day)) row.cells[staff] = "研修";
+      else if (staffAMonthEdgeWorkDay || staffBFixedWorkDay) row.cells[staff] = "出";
       else if (inputs[staff].request.has(day)) row.cells[staff] = "休";
       else if (inputs[staff].trip.has(day)) row.cells[staff] = "出張";
       else if (inputs[staff].training.has(day)) row.cells[staff] = "研修";
@@ -227,7 +231,7 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
   }
 
   repairLongRuns(schedule, inputs, holidays, ruleSettings);
-  const shiftNotices = applySelectedShiftTypes(schedule, shiftOptions, attempt);
+  const shiftNotices = applySelectedShiftTypes(schedule, shiftOptions, inputs, ruleSettings, attempt);
   const summary = summarize(schedule, inputs, holidays);
   return { year, month, schedule, summary, shiftNotices };
 }
@@ -318,6 +322,7 @@ function publicOffCapacity(schedule, startDay) {
 
 function canSetPublicOff(schedule, day, staff, inputs, holidays, ruleSettings) {
   const row = schedule[day - 1];
+  if (isStaffAMonthEdgeFixedDay(staff, row, inputs, ruleSettings)) return false;
   if (isStaffBWeekendFixedDay(staff, row, holidays, ruleSettings)) return false;
   if (row.cells[staff] !== "出") return false;
   if (STAFF.filter((name) => !WORK_TYPES.has(row.cells[name])).length >= 3) return false;
@@ -388,7 +393,7 @@ function offScore(schedule, day, staff, offRemaining, inputs, holidays, attempt)
   return score;
 }
 
-function applySelectedShiftTypes(schedule, shiftOptions, attempt) {
+function applySelectedShiftTypes(schedule, shiftOptions, inputs, ruleSettings, attempt) {
   const notices = [];
   const assignments = [];
 
@@ -401,7 +406,7 @@ function applySelectedShiftTypes(schedule, shiftOptions, attempt) {
 
   assignments.forEach((assignment) => {
     SHIFT_ELIGIBLE_STAFF.forEach((staff) => {
-      const target = findShiftAssignmentDay(schedule, staff, assignment.preferred, attempt);
+      const target = findShiftAssignmentDay(schedule, staff, assignment.preferred, inputs, ruleSettings, attempt);
       if (target) {
         schedule[target - 1].cells[staff] = assignment.type;
         if (isShiftBetweenDaysOff(schedule, target, staff)) {
@@ -416,9 +421,9 @@ function applySelectedShiftTypes(schedule, shiftOptions, attempt) {
   return notices;
 }
 
-function findShiftAssignmentDay(schedule, staff, preferred, attempt) {
+function findShiftAssignmentDay(schedule, staff, preferred, inputs, ruleSettings, attempt) {
   const candidates = schedule
-    .filter((row) => row.cells[staff] === "出")
+    .filter((row) => row.cells[staff] === "出" && !isStaffAMonthEdgeProtectedShiftDay(schedule, row.day, staff, inputs, ruleSettings))
     .map((row) => ({
       day: row.day,
       score: shiftAssignmentScore(schedule, row.day, staff, preferred, attempt),
@@ -462,6 +467,11 @@ function validateSchedule(candidate, inputs, holidays, ruleSettings) {
   const notices = [];
   const { schedule, summary } = candidate;
 
+  if (ruleSettings?.staffAMonthEdgeFixed) {
+    errors.push(...findStaffAMonthEdgeErrors(schedule, inputs, candidate.month));
+    notices.push(...findStaffAMonthEdgeNotices(schedule, inputs, candidate.month));
+  }
+
   STAFF.forEach((staff) => {
     const target = targetPublicOff(staff);
     if (inputs[staff].request.size > target) {
@@ -469,10 +479,16 @@ function validateSchedule(candidate, inputs, holidays, ruleSettings) {
     }
     if (summary[staff].publicOff !== target) {
       errors.push(`スタッフ${staff}の公休が${target}回ではありません（現在${summary[staff].publicOff}回）。原因: スタッフ別の公休回数条件`);
+      if (staff === STAFF_A && ruleSettings.staffAMonthEdgeFixed && hasStaffAMonthEdgeFixedWork(schedule, inputs)) {
+        errors.push(`スタッフA：月初・月末勤務固定により、公休日数${target}回の調整が難しくなっています。修正候補：スタッフAの別の平日に公休を移動してください。`);
+      }
     }
 
     if (summary[staff].maxRun > MAX_CONSECUTIVE_WORK) {
       errors.push(`スタッフ${staff}の連勤が最大${summary[staff].maxRun}日あります。原因: 最大連勤${MAX_CONSECUTIVE_WORK}日までの条件`);
+      if (staff === STAFF_A && ruleSettings.staffAMonthEdgeFixed && hasStaffAMonthEdgeFixedWork(schedule, inputs)) {
+        errors.push(`スタッフA：月初・月末勤務固定により、最大${MAX_CONSECUTIVE_WORK}連勤を超える可能性があります。修正候補：スタッフAの別の平日に公休を移動してください。`);
+      }
       if (staff === STAFF_B && ruleSettings.staffBWeekendFixed) {
         errors.push(`スタッフB：土日祝出勤固定ルールにより、最大${MAX_CONSECUTIVE_WORK}連勤を超える可能性があります。修正候補：最大連勤を4日に変更する、またはスタッフB土日祝固定ルールを見直してください。`);
       }
@@ -570,9 +586,103 @@ function findStaffBBlockedInputWarnings(year, month, inputs, holidays, ruleSetti
   return warnings;
 }
 
+
+function monthEdgeDays(schedule) {
+  return [1, schedule.length].filter((day, index, days) => days.indexOf(day) === index);
+}
+
+function monthEdgeLabel(schedule, day) {
+  return day === schedule.length ? "月末最終日" : "月初1日";
+}
+
+function isStaffAMonthEdgeDay(schedule, day) {
+  return day === 1 || day === schedule.length;
+}
+
+function hasStaffAMonthEdgeException(inputs, day) {
+  return inputs?.[STAFF_A]?.request?.has(day) || inputs?.[STAFF_A]?.paid?.has(day);
+}
+
+function isStaffAMonthEdgeFixedDay(staff, row, inputs, ruleSettings) {
+  if (!ruleSettings?.staffAMonthEdgeFixed || staff !== STAFF_A || !row) return false;
+  const scheduleLength = row.scheduleLength || row._scheduleLength;
+  const isEdge = row.day === 1 || (scheduleLength ? row.day === scheduleLength : false);
+  return isEdge && !hasStaffAMonthEdgeException(inputs, row.day);
+}
+
+
+function isStaffAMonthEdgeProtectedShiftDay(schedule, day, staff, inputs, ruleSettings) {
+  if (!ruleSettings?.staffAMonthEdgeFixed || staff !== STAFF_A || !isStaffAMonthEdgeDay(schedule, day)) return false;
+  return !hasStaffAMonthEdgeException(inputs, day);
+}
+
+function getStaffAMonthEdgeViolation(row, staff, inputs, ruleSettings) {
+  if (!ruleSettings?.staffAMonthEdgeFixed || staff !== STAFF_A || !row) return null;
+  const scheduleLength = row.scheduleLength || currentResult?.schedule?.length;
+  if (row.day !== 1 && row.day !== scheduleLength) return null;
+  if (hasStaffAMonthEdgeException(inputs, row.day)) return null;
+  const value = row.cells[STAFF_A];
+  return ["出", "出張", "研修"].includes(value) ? null : { value };
+}
+
+function findStaffAMonthEdgeErrors(schedule, inputs, month) {
+  return monthEdgeDays(schedule).flatMap((day) => {
+    const row = schedule[day - 1];
+    const violation = getStaffAMonthEdgeViolation(row, STAFF_A, inputs, { staffAMonthEdgeFixed: true });
+    if (!violation) return [];
+    const date = month ? `${month}/${day}` : `${day}日`;
+    const detail = violation.value === "休" || violation.value === "有"
+      ? `「${violation.value}」になっています`
+      : `勤務扱い（出・出張・研修）ではない「${violation.value}」になっています`;
+    const editHint = day === 1
+      ? "エラー：スタッフAは希望休がない限り、月初1日は勤務です"
+      : "エラー：スタッフAは希望休がない限り、月末最終日は勤務です";
+    return [`${date}：スタッフA月初月末勤務チェック。スタッフAは${monthEdgeLabel(schedule, day)}勤務ルールですが${detail}。${editHint}`];
+  });
+}
+
+function findStaffAMonthEdgeNotices(schedule, inputs, month) {
+  return monthEdgeDays(schedule).flatMap((day) => {
+    const value = schedule[day - 1].cells[STAFF_A];
+    const date = month ? `${month}/${day}` : `${day}日`;
+    const edgeShort = day === 1 ? "月初" : "月末";
+    if (inputs[STAFF_A].request.has(day) && value === "休") {
+      return [`${date}：スタッフA月初月末勤務チェック。スタッフAは${edgeShort}勤務対象日ですが、希望休があるため休みを許可しています`];
+    }
+    if (inputs[STAFF_A].paid.has(day) && value === "有") {
+      return [`${date}：スタッフA月初月末勤務チェック。スタッフAは${edgeShort}勤務対象日ですが、有給希望があるため有給を許可しています`];
+    }
+    return [];
+  });
+}
+
+function staffAMonthEdgeStats(schedule, inputs) {
+  const stats = {
+    firstDayShift: schedule[0]?.cells[STAFF_A] || "-",
+    lastDayShift: schedule[schedule.length - 1]?.cells[STAFF_A] || "-",
+    monthEdgeViolations: 0,
+    monthEdgeRequestExceptions: 0,
+    monthEdgePaidExceptions: 0,
+  };
+  monthEdgeDays(schedule).forEach((day) => {
+    const row = schedule[day - 1];
+    const value = row.cells[STAFF_A];
+    if (inputs[STAFF_A].request.has(day) && value === "休") stats.monthEdgeRequestExceptions += 1;
+    else if (inputs[STAFF_A].paid.has(day) && value === "有") stats.monthEdgePaidExceptions += 1;
+    else if (!["出", "出張", "研修"].includes(value)) stats.monthEdgeViolations += 1;
+  });
+  return stats;
+}
+
+function hasStaffAMonthEdgeFixedWork(schedule, inputs) {
+  return monthEdgeDays(schedule).some((day) => !hasStaffAMonthEdgeException(inputs, day));
+}
+
 function renderEditableCell(row, staff, result) {
   const value = row.cells[staff];
-  const violation = staff === STAFF_B && getStaffBWeekendRestViolation(row, result.holidays, result.ruleSettings);
+  const staffBViolation = staff === STAFF_B && getStaffBWeekendRestViolation(row, result.holidays, result.ruleSettings);
+  const staffAViolation = getStaffAMonthEdgeViolation(row, staff, result.inputs, result.ruleSettings);
+  const violation = staffBViolation || staffAViolation;
   const classes = [cellClass(value), violation ? "rule-violation" : ""].filter(Boolean).join(" ");
   const options = SHIFT_VALUES.map((type) => `<option value="${type}" ${type === value ? "selected" : ""}>${type}</option>`).join("");
   return `<td class="${classes}"><select class="shift-select" data-day="${row.day}" data-staff="${staff}" aria-label="${row.day}日 スタッフ${staff}">${options}</select></td>`;
@@ -685,6 +795,7 @@ function summarize(schedule, inputs, holidays) {
   STAFF.forEach((staff) => {
     summary[staff].maxRun = maxConsecutiveWork(schedule, staff);
   });
+  Object.assign(summary[STAFF_A], staffAMonthEdgeStats(schedule, inputs));
   return summary;
 }
 
@@ -705,6 +816,7 @@ function renderSummary(result) {
         <span>有給: ${item.paid}</span>
         <span>土日祝休: ${item.weekendHolidayOff}</span>
         <span>最大連勤: ${item.maxRun}</span>
+        ${staff === STAFF_A ? `<span>月初1日: ${item.firstDayShift}</span><span>月末最終日: ${item.lastDayShift}</span><span>月初月末違反: ${item.monthEdgeViolations}</span><span>希望休例外: ${item.monthEdgeRequestExceptions}</span><span>有給希望例外: ${item.monthEdgePaidExceptions}</span>` : ""}
         ${staff === STAFF_B ? `<span>土日祝出勤: ${item.weekendHolidayWork}</span><span>土日祝休み違反: ${item.weekendHolidayRestViolations}</span><span>平日公休: ${item.weekdayPublicOff}</span><span>平日有給: ${item.weekdayPaid}</span>` : ""}
         <span>出張: ${item.trip} / 研修: ${item.training}</span>
         <span>早帰り: ${item.early} / 遅番: ${item.late}</span>
@@ -780,10 +892,10 @@ function exportExcel() {
       return `<tr><td>${row.day}日(${WEEKDAYS[row.weekday]})</td>${STAFF.map((staff) => `<td>${row.cells[staff]}</td>`).join("")}<td>${workers}</td></tr>`;
     }),
     `<tr></tr>`,
-    `<tr><th>スタッフ</th><th>公休</th><th>有給</th><th>土日祝休</th><th>最大連勤</th><th>出張</th><th>研修</th><th>早帰り</th><th>遅番</th></tr>`,
+    `<tr><th>スタッフ</th><th>公休</th><th>有給</th><th>土日祝休</th><th>最大連勤</th><th>月初1日</th><th>月末最終日</th><th>月初月末違反</th><th>希望休例外</th><th>有給希望例外</th><th>出張</th><th>研修</th><th>早帰り</th><th>遅番</th></tr>`,
     ...STAFF.map((staff) => {
       const item = currentResult.summary[staff];
-      return `<tr><td>${staff}</td><td>${item.publicOff}</td><td>${item.paid}</td><td>${item.weekendHolidayOff}</td><td>${item.maxRun}</td><td>${item.trip}</td><td>${item.training}</td><td>${item.early}</td><td>${item.late}</td></tr>`;
+      return `<tr><td>${staff}</td><td>${item.publicOff}</td><td>${item.paid}</td><td>${item.weekendHolidayOff}</td><td>${item.maxRun}</td><td>${item.firstDayShift || "-"}</td><td>${item.lastDayShift || "-"}</td><td>${item.monthEdgeViolations || 0}</td><td>${item.monthEdgeRequestExceptions || 0}</td><td>${item.monthEdgePaidExceptions || 0}</td><td>${item.trip}</td><td>${item.training}</td><td>${item.early}</td><td>${item.late}</td></tr>`;
     }),
   ];
 
@@ -809,6 +921,7 @@ function clearInputs() {
   els.earlyShift.checked = false;
   els.lateShift.checked = false;
   if (els.staffBWeekendFixed) els.staffBWeekendFixed.checked = true;
+  if (els.staffAMonthEdgeFixed) els.staffAMonthEdgeFixed.checked = true;
   currentResult = null;
   els.export.disabled = true;
   renderEmptyState();
