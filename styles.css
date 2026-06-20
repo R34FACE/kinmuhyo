@@ -506,3 +506,36 @@ input {
   border-color: var(--danger);
   background: #fff5f5;
 }
+
+select {
+  width: 100%;
+  height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 11px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+
+.fixed-off-target {
+  display: inline-flex;
+  align-items: center;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 11px;
+  background: #eef3f8;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.off-balance-ok {
+  color: var(--green) !important;
+  font-weight: 700;
+}
+
+.off-balance-error {
+  color: var(--danger) !important;
+  font-weight: 700;
+}

@@ -7,7 +7,10 @@ const STAFF_A = "A";
 const STAFF_B = "B";
 const MAX_CONSECUTIVE_WORK = 3;
 const SHIFT_ELIGIBLE_STAFF = STAFF.filter((staff) => staff !== "D" && staff !== "G");
-const OFF_TARGETS = { A: 10, B: 10, C: 10, D: 9, E: 10, F: 10, G: 9 };
+const SELECTABLE_OFF_STAFF = new Set(["A", "B", "C", "E", "F"]);
+const FIXED_OFF_STAFF = new Set(["D", "G"]);
+const DEFAULT_OFF_TARGET = 9;
+const STAFF_OFF_STORAGE_KEY = "kinmuhyo.staffOffTargets.v1";
 const MAX_ATTEMPTS = 1800;
 
 const els = {
@@ -37,7 +40,8 @@ function init() {
   els.year.value = now.getFullYear();
   els.month.value = now.getMonth() + 1;
   renderStaffInputs();
-  renderEmptyState();
+  const savedOffTargetWarnings = loadSavedOffTargets();
+  renderEmptyState(savedOffTargetWarnings);
 
   els.generate.addEventListener("click", () => {
     currentResult = generate();
@@ -47,6 +51,7 @@ function init() {
   els.clear.addEventListener("click", clearInputs);
   els.sample.addEventListener("click", fillSample);
   els.table.addEventListener("change", handleManualEdit);
+  els.staffInputs.addEventListener("change", handleStaffInputChange);
 }
 
 function renderStaffInputs() {
@@ -54,6 +59,7 @@ function renderStaffInputs() {
     <article class="staff-card">
       <h3>スタッフ${staff}</h3>
       <div class="staff-fields">
+        ${renderOffTargetInput(staff)}
         <label>前月最終休み日<input data-previous-last-off data-staff="${staff}" type="number" min="1" max="31" inputmode="numeric" placeholder="例: 29"></label>
         <label>希望公休<input data-kind="request" data-staff="${staff}" placeholder="例: 3, 8, 22"></label>
         <label>有給<input data-kind="paid" data-staff="${staff}" placeholder="例: 15"></label>
@@ -64,11 +70,13 @@ function renderStaffInputs() {
   `).join("");
 }
 
-function renderEmptyState() {
+function renderEmptyState(warnings = []) {
   els.summary.innerHTML = STAFF.map((staff) => `
-    <div class="summary-card"><strong>${staff}</strong><span>公休: -<br>有給: -<br>土日祝休: -</span></div>
+    <div class="summary-card"><strong>${staff}</strong><span>設定休: ${formatOffTarget(targetPublicOff(staff), staff)}<br>実績休: -<br>有給: -<br>判定: -</span></div>
   `).join("");
-  els.messages.innerHTML = `<div class="message"><h3>待機中</h3><p>年月と各スタッフの予定を入力して「自動作成」を押してください。</p></div>`;
+  els.messages.innerHTML = warnings.length
+    ? messageList("保存データ補正", warnings, "warn")
+    : `<div class="message"><h3>待機中</h3><p>年月と各スタッフの予定を入力して「自動作成」を押してください。</p></div>`;
   els.table.innerHTML = "";
 }
 
@@ -84,6 +92,8 @@ function generate() {
   const shiftOptions = getShiftOptions();
   const ruleSettings = getRuleSettings();
   const { inputs, warnings } = getInputs(daysInMonth, previousMonthDays);
+  saveOffTargets(inputs.offTargets);
+  const feasibilityWarnings = checkOffTargetFeasibility(daysInMonth, inputs.offTargets);
   const fixedWarnings = findInputConflicts(inputs);
   const staffBInputWarnings = findStaffBBlockedInputWarnings(year, month, inputs, holidays, ruleSettings);
 
@@ -109,7 +119,7 @@ function generate() {
     ruleSettings,
     schedule: best.candidate.schedule,
     summary: best.candidate.summary,
-    errors: unique([...warnings, ...fixedWarnings, ...best.validation.errors]),
+    errors: unique([...warnings, ...fixedWarnings, ...feasibilityWarnings, ...best.validation.errors]),
     notices: unique([...staffBInputWarnings, ...best.validation.notices, ...best.candidate.shiftNotices]),
   };
 }
@@ -137,6 +147,7 @@ function getInputs(daysInMonth, previousMonthDays) {
   });
 
   inputs._previousMonthDays = previousMonthDays;
+  inputs.offTargets = getOffTargetsFromControls();
 
   document.querySelectorAll("[data-previous-last-off][data-staff]").forEach((node) => {
     const staff = node.dataset.staff;
@@ -197,7 +208,7 @@ function getPreviousMonthDays(year, month) {
 
 function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions, ruleSettings, attempt) {
   const schedule = [];
-  const offRemaining = Object.fromEntries(STAFF.map((staff) => [staff, targetPublicOff(staff)]));
+  const offRemaining = Object.fromEntries(STAFF.map((staff) => [staff, targetPublicOff(staff, inputs)]));
 
   for (let day = 1; day <= daysInMonth; day += 1) {
     const row = { day, weekday: new Date(year, month - 1, day).getDay(), scheduleLength: daysInMonth, cells: {} };
@@ -217,7 +228,7 @@ function buildCandidate(year, month, daysInMonth, holidays, inputs, shiftOptions
   }
 
   STAFF.forEach((staff) => {
-    offRemaining[staff] = Math.max(0, targetPublicOff(staff) - reflectedRequestCount(schedule, staff));
+    offRemaining[staff] = Math.max(0, targetPublicOff(staff, inputs) - reflectedRequestCount(schedule, staff));
   });
 
   for (let day = 1; day <= daysInMonth; day += 1) {
@@ -288,7 +299,7 @@ function repairLongRuns(schedule, inputs, holidays, ruleSettings) {
       }
 
       const nextSummary = summarize(schedule, inputs, holidays, ruleSettings);
-      const validCounts = nextSummary[staff].publicOff === targetPublicOff(staff);
+      const validCounts = nextSummary[staff].publicOff === targetPublicOff(staff, inputs);
       const improved = nextSummary[staff].maxRun < summary[staff].maxRun;
       if (validCounts && improved && basicDailyRulesPass(schedule)) {
         changed = true;
@@ -507,12 +518,15 @@ function validateSchedule(candidate, inputs, holidays, ruleSettings) {
   }
 
   STAFF.forEach((staff) => {
-    const target = targetPublicOff(staff);
+    const target = targetPublicOff(staff, inputs);
     if (inputs[staff].request.size > target) {
       errors.push(`スタッフ${staff}の希望公休が${inputs[staff].request.size}日あり、公休目標${target}回を超えています。原因: 希望公休の入力数`);
     }
     if (summary[staff].publicOff !== target) {
-      errors.push(`スタッフ${staff}の公休が${target}回ではありません（現在${summary[staff].publicOff}回）。原因: スタッフ別の公休回数条件`);
+      const diff = summary[staff].publicOff - target;
+      const shortageText = diff < 0 ? `${Math.abs(diff)}回不足しています` : `${diff}回多くなっています`;
+      const fixedText = FIXED_OFF_STAFF.has(staff) ? `9回固定ですが、${summary[staff].publicOff}回${diff < 0 ? "しかありません" : "設定されています"}` : `${shortageText}`;
+      errors.push(`スタッフ${staff}の基本休みは${fixedText}。設定${formatOffTarget(target, staff)}、実績${summary[staff].publicOff}回、過不足${formatDiff(diff)}。修正候補: 「休」の日数を${target}回に調整してください。`);
       if (staff === STAFF_A && ruleSettings.staffAMonthEdgeFixed && hasStaffAMonthEdgeFixedWork(schedule, inputs)) {
         errors.push(`スタッフA：月初・月末勤務固定により、公休日数${target}回の調整が難しくなっています。修正候補：スタッフAの別の平日に公休を移動してください。`);
       }
@@ -843,7 +857,7 @@ function scoreCandidate(validation, candidate, inputs, holidays, ruleSettings) {
   let score = validation.errors.length * 10000 + (validation.notices.length + (candidate.shiftNotices?.length || 0)) * 90;
   score += shiftPreferencePenalty(candidate.schedule) * 25;
   STAFF.forEach((staff) => {
-    score += Math.abs(candidate.summary[staff].publicOff - targetPublicOff(staff)) * 5000;
+    score += Math.abs(candidate.summary[staff].publicOff - targetPublicOff(staff, inputs)) * 5000;
     score += Math.max(0, candidate.summary[staff].maxRun - MAX_CONSECUTIVE_WORK) * 2200;
     score += nonRequestedLongOffRuns(candidate.schedule, staff, inputs).length * 2400;
     const missed = [...inputs[staff].request].filter((day) => candidate.schedule[day - 1].cells[staff] !== "休" && !isStaffBWeekendFixedDay(staff, candidate.schedule[day - 1], holidays, ruleSettings)).length;
@@ -927,7 +941,9 @@ function renderSummary(result) {
     return `
       <div class="summary-card">
         <strong>${staff}</strong>
-        <span>公休: ${item.publicOff} / ${targetPublicOff(staff)}</span>
+        <span>設定休: ${formatOffTarget(targetPublicOff(staff, result.inputs), staff)}</span>
+        <span class="${offBalanceClass(item.publicOff, targetPublicOff(staff, result.inputs))}">実績休: ${item.publicOff} / ${targetPublicOff(staff, result.inputs)}（${formatDiff(item.publicOff - targetPublicOff(staff, result.inputs))}）</span>
+        <span>判定: ${item.publicOff === targetPublicOff(staff, result.inputs) ? "OK" : "エラー"}</span>
         <span>有給: ${item.paid}</span>
         <span>土日祝休: ${item.weekendHolidayOff}</span>
         <span>最大連勤: ${item.maxRun}</span>
@@ -1011,10 +1027,12 @@ function exportExcel() {
       return `<tr><td>${row.day}日(${WEEKDAYS[row.weekday]})</td>${STAFF.map((staff) => `<td>${row.cells[staff]}</td>`).join("")}<td>${workers}</td></tr>`;
     }),
     `<tr></tr>`,
-    `<tr><th>スタッフ</th><th>公休</th><th>有給</th><th>土日祝休</th><th>最大連勤</th><th>前月最終休み</th><th>持ち越し連勤</th><th>月初最大連勤</th><th>月初連勤エラー</th><th>月初1日</th><th>月末最終日</th><th>月初月末違反</th><th>希望休例外</th><th>有給希望例外</th><th>出張</th><th>研修</th><th>早帰り</th><th>遅番</th></tr>`,
+    `<tr><th>スタッフ</th><th>設定休</th><th>実績休</th><th>有給</th><th>過不足</th><th>判定</th><th>土日祝休</th><th>最大連勤</th><th>前月最終休み</th><th>持ち越し連勤</th><th>月初最大連勤</th><th>月初連勤エラー</th><th>月初1日</th><th>月末最終日</th><th>月初月末違反</th><th>希望休例外</th><th>有給希望例外</th><th>出張</th><th>研修</th><th>早帰り</th><th>遅番</th></tr>`,
     ...STAFF.map((staff) => {
       const item = currentResult.summary[staff];
-      return `<tr><td>${staff}</td><td>${item.publicOff}</td><td>${item.paid}</td><td>${item.weekendHolidayOff}</td><td>${item.maxRun}</td><td>${item.previousLastOffLabel}</td><td>${item.previousCarryoverLabel}</td><td>${item.monthStartMaxRunLabel}</td><td>${item.monthStartCarryoverErrors}</td><td>${item.firstDayShift || "-"}</td><td>${item.lastDayShift || "-"}</td><td>${item.monthEdgeViolations || 0}</td><td>${item.monthEdgeRequestExceptions || 0}</td><td>${item.monthEdgePaidExceptions || 0}</td><td>${item.trip}</td><td>${item.training}</td><td>${item.early}</td><td>${item.late}</td></tr>`;
+      const target = targetPublicOff(staff, currentResult.inputs);
+      const diff = item.publicOff - target;
+      return `<tr><td>${staff}</td><td>${formatOffTarget(target, staff)}</td><td>${item.publicOff}</td><td>${item.paid}</td><td>${formatDiff(diff)}</td><td>${diff === 0 ? "OK" : "エラー"}</td><td>${item.weekendHolidayOff}</td><td>${item.maxRun}</td><td>${item.previousLastOffLabel}</td><td>${item.previousCarryoverLabel}</td><td>${item.monthStartMaxRunLabel}</td><td>${item.monthStartCarryoverErrors}</td><td>${item.firstDayShift || "-"}</td><td>${item.lastDayShift || "-"}</td><td>${item.monthEdgeViolations || 0}</td><td>${item.monthEdgeRequestExceptions || 0}</td><td>${item.monthEdgePaidExceptions || 0}</td><td>${item.trip}</td><td>${item.training}</td><td>${item.early}</td><td>${item.late}</td></tr>`;
     }),
   ];
 
@@ -1239,8 +1257,72 @@ function kindLabel(kind) {
   return { request: "希望公休", paid: "有給", trip: "出張", training: "研修" }[kind] || kind;
 }
 
-function targetPublicOff(staff) {
-  return OFF_TARGETS[staff] || 10;
+function targetPublicOff(staff, inputs = null) {
+  if (FIXED_OFF_STAFF.has(staff)) return 9;
+  const value = Number(inputs?.offTargets?.[staff] ?? document.querySelector(`[data-off-target][data-staff="${staff}"]`)?.value ?? DEFAULT_OFF_TARGET);
+  return SELECTABLE_OFF_STAFF.has(staff) && value === 10 ? 10 : DEFAULT_OFF_TARGET;
+}
+
+function renderOffTargetInput(staff) {
+  if (FIXED_OFF_STAFF.has(staff)) {
+    return `<label>基本休み回数<span class="fixed-off-target" data-off-target data-staff="${staff}" data-value="9">9回固定</span></label>`;
+  }
+  return `<label>基本休み回数<select data-off-target data-staff="${staff}"><option value="9" selected>9回</option><option value="10">10回</option></select></label>`;
+}
+
+function getOffTargetsFromControls() {
+  return Object.fromEntries(STAFF.map((staff) => [staff, targetPublicOff(staff)]));
+}
+
+function handleStaffInputChange(event) {
+  if (!event.target.matches("[data-off-target]")) return;
+  saveOffTargets(getOffTargetsFromControls());
+  if (!currentResult) return;
+  currentResult.inputs.offTargets = getOffTargetsFromControls();
+  currentResult.summary = summarize(currentResult.schedule, currentResult.inputs, currentResult.holidays, currentResult.ruleSettings);
+  const validation = validateSchedule({ schedule: currentResult.schedule, summary: currentResult.summary, month: currentResult.month }, currentResult.inputs, currentResult.holidays, currentResult.ruleSettings);
+  currentResult.errors = unique([...checkOffTargetFeasibility(currentResult.daysInMonth, currentResult.inputs.offTargets), ...validation.errors]);
+  currentResult.notices = unique(validation.notices);
+  renderResult(currentResult);
+}
+
+function loadSavedOffTargets() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(STAFF_OFF_STORAGE_KEY) || "{}"); } catch { saved = {}; }
+  const corrections = [];
+  STAFF.forEach((staff) => {
+    const node = document.querySelector(`[data-off-target][data-staff="${staff}"]`);
+    if (FIXED_OFF_STAFF.has(staff)) {
+      if (Number(saved[staff]) && Number(saved[staff]) !== 9) corrections.push(`スタッフ${staff}の保存済み基本休み${saved[staff]}回を9回固定へ補正しました。`);
+      return;
+    }
+    if (node) node.value = Number(saved[staff]) === 10 ? "10" : "9";
+  });
+  return corrections;
+}
+
+function saveOffTargets(targets) {
+  try { localStorage.setItem(STAFF_OFF_STORAGE_KEY, JSON.stringify(Object.fromEntries(STAFF.map((staff) => [staff, FIXED_OFF_STAFF.has(staff) ? 9 : (targets[staff] === 10 ? 10 : 9)])))); } catch {}
+}
+
+function formatOffTarget(target, staff) {
+  return FIXED_OFF_STAFF.has(staff) ? `${target}固定` : `${target}`;
+}
+
+function formatDiff(diff) {
+  if (diff === 0) return "0";
+  return diff > 0 ? `+${diff}回超過` : `${diff}回不足`;
+}
+
+function offBalanceClass(actual, target) {
+  return actual === target ? "off-balance-ok" : "off-balance-error";
+}
+
+function checkOffTargetFeasibility(daysInMonth, offTargets) {
+  const minimumRequiredWork = daysInMonth * 4;
+  const availableWork = STAFF.reduce((total, staff) => total + daysInMonth - targetPublicOff(staff, { offTargets }), 0);
+  if (availableWork >= minimumRequiredWork) return [];
+  return [`現在の設定では必要な延べ出勤人数が不足しています。月間の必要最低延べ出勤人数${minimumRequiredWork}人日に対し、現在設定されている延べ出勤可能人数は${availableWork}人日です。修正候補：一部スタッフを9回休みに変更してください。`];
 }
 
 function clamp(value, min, max) {
