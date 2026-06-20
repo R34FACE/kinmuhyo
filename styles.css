@@ -539,3 +539,39 @@ select {
   color: var(--danger) !important;
   font-weight: 700;
 }
+
+.common-holiday-setting {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+}
+
+.common-holiday-setting label {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.common-holiday-setting select {
+  min-height: 44px;
+  font-size: 16px;
+}
+
+.fixed-staff-note {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.summary-common-setting {
+  grid-column: 1 / -1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff;
+  font-weight: 700;
+}
