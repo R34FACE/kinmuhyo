@@ -42,6 +42,15 @@
 
         <fieldset class="shift-options" aria-describedby="staffBWeekendFixedHint">
           <legend>基本設定</legend>
+          <div class="common-holiday-setting">
+            <label for="commonHolidayCountInput">D・G以外の基本休み回数</label>
+            <select id="commonHolidayCountInput">
+              <option value="9" selected>9回</option>
+              <option value="10">10回</option>
+            </select>
+            <p class="hint compact">この設定はスタッフA・B・C・E・Fに一括適用されます。スタッフD・Gは常に9回固定です。</p>
+            <div class="fixed-staff-note"><strong>固定スタッフ</strong><span>D：9回固定</span><span>G：9回固定</span></div>
+          </div>
           <label class="checkbox-label"><input id="staffBWeekendFixedInput" type="checkbox" checked>スタッフBを土日祝出勤固定にする</label>
           <p id="staffBWeekendFixedHint" class="hint compact">オンの場合、スタッフBは土日祝に「休」「有」を入れず、勤務扱いになります。</p>
           <label class="checkbox-label"><input id="staffAMonthEdgeFixedInput" type="checkbox" checked>スタッフAを月初・月末勤務にする</label>

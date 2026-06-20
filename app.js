@@ -10,13 +10,15 @@ const SHIFT_ELIGIBLE_STAFF = STAFF.filter((staff) => staff !== "D" && staff !== 
 const SELECTABLE_OFF_STAFF = new Set(["A", "B", "C", "E", "F"]);
 const FIXED_OFF_STAFF = new Set(["D", "G"]);
 const DEFAULT_OFF_TARGET = 9;
-const STAFF_OFF_STORAGE_KEY = "kinmuhyo.staffOffTargets.v1";
+const COMMON_HOLIDAY_STORAGE_KEY = "kinmuhyo.commonHolidayCount.v1";
+const LEGACY_STAFF_OFF_STORAGE_KEY = "kinmuhyo.staffOffTargets.v1";
 const MAX_ATTEMPTS = 1800;
 
 const els = {
   year: document.getElementById("yearInput"),
   month: document.getElementById("monthInput"),
   staffInputs: document.getElementById("staffInputs"),
+  commonHolidayCount: document.getElementById("commonHolidayCountInput"),
   earlyShift: document.getElementById("earlyShiftInput"),
   lateShift: document.getElementById("lateShiftInput"),
   staffBWeekendFixed: document.getElementById("staffBWeekendFixedInput"),
@@ -52,6 +54,7 @@ function init() {
   els.sample.addEventListener("click", fillSample);
   els.table.addEventListener("change", handleManualEdit);
   els.staffInputs.addEventListener("change", handleStaffInputChange);
+  if (els.commonHolidayCount) els.commonHolidayCount.addEventListener("change", handleStaffInputChange);
 }
 
 function renderStaffInputs() {
@@ -59,7 +62,6 @@ function renderStaffInputs() {
     <article class="staff-card">
       <h3>スタッフ${staff}</h3>
       <div class="staff-fields">
-        ${renderOffTargetInput(staff)}
         <label>前月最終休み日<input data-previous-last-off data-staff="${staff}" type="number" min="1" max="31" inputmode="numeric" placeholder="例: 29"></label>
         <label>希望公休<input data-kind="request" data-staff="${staff}" placeholder="例: 3, 8, 22"></label>
         <label>有給<input data-kind="paid" data-staff="${staff}" placeholder="例: 15"></label>
@@ -92,8 +94,8 @@ function generate() {
   const shiftOptions = getShiftOptions();
   const ruleSettings = getRuleSettings();
   const { inputs, warnings } = getInputs(daysInMonth, previousMonthDays);
-  saveOffTargets(inputs.offTargets);
-  const feasibilityWarnings = checkOffTargetFeasibility(daysInMonth, inputs.offTargets);
+  saveCommonHolidayCount(inputs.commonHolidayCount);
+  const feasibilityWarnings = checkOffTargetFeasibility(daysInMonth, inputs, holidays);
   const fixedWarnings = findInputConflicts(inputs);
   const staffBInputWarnings = findStaffBBlockedInputWarnings(year, month, inputs, holidays, ruleSettings);
 
@@ -147,7 +149,7 @@ function getInputs(daysInMonth, previousMonthDays) {
   });
 
   inputs._previousMonthDays = previousMonthDays;
-  inputs.offTargets = getOffTargetsFromControls();
+  inputs.commonHolidayCount = getCommonHolidayCountFromControl();
 
   document.querySelectorAll("[data-previous-last-off][data-staff]").forEach((node) => {
     const staff = node.dataset.staff;
@@ -936,7 +938,8 @@ function renderResult(result) {
 }
 
 function renderSummary(result) {
-  els.summary.innerHTML = STAFF.map((staff) => {
+  const commonSetting = result.inputs.commonHolidayCount || DEFAULT_OFF_TARGET;
+  const cards = STAFF.map((staff) => {
     const item = result.summary[staff];
     return `
       <div class="summary-card">
@@ -958,6 +961,7 @@ function renderSummary(result) {
       </div>
     `;
   }).join("");
+  els.summary.innerHTML = `<div class="summary-common-setting">D・G以外の基本休み回数：${commonSetting}回<br>D・G：9回固定</div>${cards}`;
 }
 
 function renderMessages(result) {
@@ -1021,6 +1025,8 @@ function exportExcel() {
   if (!currentResult) return;
   const title = `${currentResult.year}年${currentResult.month}月 勤務表`;
   const rows = [
+    `<tr><th>共通設定</th><td>D・G以外の基本休み回数：${currentResult.inputs.commonHolidayCount || DEFAULT_OFF_TARGET}回</td><td>D・G：9回固定</td></tr>`,
+    `<tr></tr>`,
     `<tr><th>日付</th>${STAFF.map((staff) => `<th>${staff}</th>`).join("")}<th>出勤者</th></tr>`,
     ...currentResult.schedule.map((row) => {
       const workers = STAFF.filter((staff) => WORK_TYPES.has(row.cells[staff])).length;
@@ -1257,52 +1263,51 @@ function kindLabel(kind) {
   return { request: "希望公休", paid: "有給", trip: "出張", training: "研修" }[kind] || kind;
 }
 
+function getRequiredHolidayCount(staffId, inputs = null) {
+  if (FIXED_OFF_STAFF.has(staffId)) return DEFAULT_OFF_TARGET;
+  const value = Number(inputs?.commonHolidayCount ?? getCommonHolidayCountFromControl());
+  return value === 10 ? 10 : DEFAULT_OFF_TARGET;
+}
+
 function targetPublicOff(staff, inputs = null) {
-  if (FIXED_OFF_STAFF.has(staff)) return 9;
-  const value = Number(inputs?.offTargets?.[staff] ?? document.querySelector(`[data-off-target][data-staff="${staff}"]`)?.value ?? DEFAULT_OFF_TARGET);
-  return SELECTABLE_OFF_STAFF.has(staff) && value === 10 ? 10 : DEFAULT_OFF_TARGET;
+  return getRequiredHolidayCount(staff, inputs);
 }
 
-function renderOffTargetInput(staff) {
-  if (FIXED_OFF_STAFF.has(staff)) {
-    return `<label>基本休み回数<span class="fixed-off-target" data-off-target data-staff="${staff}" data-value="9">9回固定</span></label>`;
-  }
-  return `<label>基本休み回数<select data-off-target data-staff="${staff}"><option value="9" selected>9回</option><option value="10">10回</option></select></label>`;
-}
-
-function getOffTargetsFromControls() {
-  return Object.fromEntries(STAFF.map((staff) => [staff, targetPublicOff(staff)]));
+function getCommonHolidayCountFromControl() {
+  return Number(els.commonHolidayCount?.value) === 10 ? 10 : DEFAULT_OFF_TARGET;
 }
 
 function handleStaffInputChange(event) {
-  if (!event.target.matches("[data-off-target]")) return;
-  saveOffTargets(getOffTargetsFromControls());
+  if (!event.target.matches("#commonHolidayCountInput")) return;
+  const commonHolidayCount = getCommonHolidayCountFromControl();
+  saveCommonHolidayCount(commonHolidayCount);
   if (!currentResult) return;
-  currentResult.inputs.offTargets = getOffTargetsFromControls();
+  currentResult.inputs.commonHolidayCount = commonHolidayCount;
   currentResult.summary = summarize(currentResult.schedule, currentResult.inputs, currentResult.holidays, currentResult.ruleSettings);
   const validation = validateSchedule({ schedule: currentResult.schedule, summary: currentResult.summary, month: currentResult.month }, currentResult.inputs, currentResult.holidays, currentResult.ruleSettings);
-  currentResult.errors = unique([...checkOffTargetFeasibility(currentResult.daysInMonth, currentResult.inputs.offTargets), ...validation.errors]);
+  currentResult.errors = unique([...checkOffTargetFeasibility(currentResult.daysInMonth, currentResult.inputs, currentResult.holidays), ...validation.errors]);
   currentResult.notices = unique(validation.notices);
   renderResult(currentResult);
 }
 
 function loadSavedOffTargets() {
-  let saved = {};
-  try { saved = JSON.parse(localStorage.getItem(STAFF_OFF_STORAGE_KEY) || "{}"); } catch { saved = {}; }
   const corrections = [];
-  STAFF.forEach((staff) => {
-    const node = document.querySelector(`[data-off-target][data-staff="${staff}"]`);
-    if (FIXED_OFF_STAFF.has(staff)) {
-      if (Number(saved[staff]) && Number(saved[staff]) !== 9) corrections.push(`スタッフ${staff}の保存済み基本休み${saved[staff]}回を9回固定へ補正しました。`);
-      return;
-    }
-    if (node) node.value = Number(saved[staff]) === 10 ? "10" : "9";
-  });
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(COMMON_HOLIDAY_STORAGE_KEY) || "null"); } catch { saved = null; }
+  let commonHolidayCount = Number(saved?.commonHolidayCount ?? saved);
+  if (commonHolidayCount !== 9 && commonHolidayCount !== 10) {
+    if (saved !== null) corrections.push(`保存済み共通休み回数${commonHolidayCount}回は無効なため9回に補正しました。`);
+    commonHolidayCount = DEFAULT_OFF_TARGET;
+  }
+  let legacy = {};
+  try { legacy = JSON.parse(localStorage.getItem(LEGACY_STAFF_OFF_STORAGE_KEY) || "{}"); } catch { legacy = {}; }
+  if (Object.keys(legacy || {}).length) corrections.push("旧形式のスタッフ別基本休み回数は読み込み時に無視しました。共通設定を使用します。");
+  if (els.commonHolidayCount) els.commonHolidayCount.value = String(commonHolidayCount);
   return corrections;
 }
 
-function saveOffTargets(targets) {
-  try { localStorage.setItem(STAFF_OFF_STORAGE_KEY, JSON.stringify(Object.fromEntries(STAFF.map((staff) => [staff, FIXED_OFF_STAFF.has(staff) ? 9 : (targets[staff] === 10 ? 10 : 9)])))); } catch {}
+function saveCommonHolidayCount(commonHolidayCount) {
+  try { localStorage.setItem(COMMON_HOLIDAY_STORAGE_KEY, JSON.stringify({ commonHolidayCount: commonHolidayCount === 10 ? 10 : 9 })); } catch {}
 }
 
 function formatOffTarget(target, staff) {
@@ -1318,11 +1323,11 @@ function offBalanceClass(actual, target) {
   return actual === target ? "off-balance-ok" : "off-balance-error";
 }
 
-function checkOffTargetFeasibility(daysInMonth, offTargets) {
+function checkOffTargetFeasibility(daysInMonth, inputs, holidays = new Set()) {
   const minimumRequiredWork = daysInMonth * 4;
-  const availableWork = STAFF.reduce((total, staff) => total + daysInMonth - targetPublicOff(staff, { offTargets }), 0);
+  const availableWork = STAFF.reduce((total, staff) => total + daysInMonth - targetPublicOff(staff, inputs) - (inputs?.[staff]?.paid?.size || 0), 0);
   if (availableWork >= minimumRequiredWork) return [];
-  return [`現在の設定では必要な延べ出勤人数が不足しています。月間の必要最低延べ出勤人数${minimumRequiredWork}人日に対し、現在設定されている延べ出勤可能人数は${availableWork}人日です。修正候補：一部スタッフを9回休みに変更してください。`];
+  return [`共通休み回数${inputs?.commonHolidayCount || DEFAULT_OFF_TARGET}回では、月間の必要最低出勤人数を満たせない可能性があります。月間の必要最低延べ出勤人数${minimumRequiredWork}人日に対し、出勤可能人数は${availableWork}人日です。修正候補：共通休み回数を9回に変更してください。`];
 }
 
 function clamp(value, min, max) {
